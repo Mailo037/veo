@@ -284,13 +284,25 @@ test('a finished staged file is saved without asking the backend again', async (
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('a symlinked staging path is refused instead of followed', async () => {
+test('a symlinked staging path is refused instead of followed', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-link-'));
   const target = await mkdtemp(path.join(os.tmpdir(), 'veo-target-'));
   try {
-    await symlink(target, path.join(directory, '.veo-part-vid123'), 'dir').catch(() => undefined);
     const backendResolver = async () => ({ ytDlp: 'yt-dlp-fake', ffmpegLocation: 'tools' });
     const runner = async (executable, args) => (args.includes('--dump-single-json') ? JSON.stringify({ id: 'vid123', title: 't', formats: [] }) : '');
+    const link = path.join(directory, '.veo-part-vid123');
+    // Whatever occupies the predictable path, it must be a real directory.
+    await writeFile(link, 'not a directory');
+    await assert.rejects(
+      download({ url: URL, output: directory, quality: 'best', resume: true }, { backendResolver, runner }),
+      /not a plain directory/,
+    );
+    await rm(link, { force: true });
+    // Creating symlinks needs privileges on Windows, so this half is skipped there.
+    if (!await symlink(target, link, 'dir').then(() => true, () => false)) {
+      t.skip('this platform does not allow creating symlinks');
+      return;
+    }
     await assert.rejects(
       download({ url: URL, output: directory, quality: 'best', resume: true }, { backendResolver, runner }),
       /not a plain directory/,

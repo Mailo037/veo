@@ -49,11 +49,19 @@ test('PATH discovery finds executables and ignores non-absolute entries', async 
 });
 
 test('well-known media directories are absolute and platform-appropriate', () => {
+  // Windows-style candidates must be judged with the Windows path rules, not
+  // with those of whatever host happens to run the tests.
   for (const directory of wellKnownMediaDirectories({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local', ProgramFiles: 'C:\\Program Files' } })) {
-    assert.ok(path.isAbsolute(directory), directory);
+    assert.ok(path.win32.isAbsolute(directory), directory);
+  }
+  // Without LOCALAPPDATA or ProgramFiles the list must still hold no broken entries.
+  for (const directory of wellKnownMediaDirectories({ platform: 'win32', env: {} })) {
+    assert.ok(path.win32.isAbsolute(directory), directory);
+  }
+  for (const directory of wellKnownMediaDirectories({ platform: 'linux', env: {} })) {
+    assert.ok(path.posix.isAbsolute(directory), directory);
   }
   assert.ok(wellKnownMediaDirectories({ platform: 'linux', env: {} }).includes('/usr/bin'));
-  assert.deepEqual(wellKnownMediaDirectories({ platform: 'win32', env: {} }).filter(d => !path.isAbsolute(d)), []);
 });
 
 test('the backend cache is versioned and platform-specific', () => {

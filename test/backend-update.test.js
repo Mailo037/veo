@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   RELEASE, activeOverride, backendCacheDirectory, backendStateFile,
-  clearBackendOverride, readBackendOverride, writeBackendOverride, installBackend, releaseUrl,
+  clearBackendOverride, exeSuffix, readBackendOverride, writeBackendOverride, installBackend, releaseUrl,
 } from '../src/backend.js';
 import { BACKEND_HELP, backendUpdateMain, checkBackend, fetchLatestBackendRelease, parseChecksums, fetchReleaseChecksum } from '../src/backend-update.js';
 import { compareVersions } from '../src/version.js';
@@ -100,7 +100,7 @@ test('only a newer, correctly hashed install is treated as active', async () => 
     await write({ release: '2099.01.01', asset, sha256: 'e'.repeat(64) });
     const active = await activeOverride(asset, { stateFile, matchesImpl: async () => true });
     assert.equal(active.release, '2099.01.01');
-    assert.equal(active.path, path.join(backendCacheDirectory('2099.01.01'), 'yt-dlp.exe'));
+    assert.equal(active.path, path.join(backendCacheDirectory('2099.01.01'), `yt-dlp${exeSuffix()}`));
     assert.equal(await activeOverride(undefined, { stateFile, matchesImpl: async () => true }), null);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
