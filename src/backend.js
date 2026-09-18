@@ -1,17 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, constants } from 'node:fs';
-import { access, chmod, copyFile, lstat, mkdir, rename, rm, stat } from 'node:fs/promises';
+import { access, chmod, copyFile, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import os from 'node:os';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { cacheBase } from './paths.js';
+import { compareVersions } from './version.js';
 
 const require = createRequire(import.meta.url);
 export const RELEASE = '2026.08.19';
-const RELEASE_URL = `https://github.com/yt-dlp/yt-dlp/releases/download/${RELEASE}`;
+const RELEASE_HOST = 'https://github.com/yt-dlp/yt-dlp/releases/download';
 const MAX_BYTES = 256 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT = 180_000;
+const RELEASE_PATTERN = /^\d{4}\.\d{2}\.\d{2}(?:\.\d+)?$/;
 // Official hashes fetched at development time; never trust a runtime checksum download.
 // https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/SHA2-256SUMS
 const HASHES = Object.freeze({
@@ -31,15 +33,147 @@ export function selectAsset(platform = process.platform, arch = process.arch, mu
   if (platform === 'linux' && ['x64', 'arm64'].includes(arch)) return `yt-dlp_${musl ? 'musl' : ''}linux${arch === 'arm64' ? '_aarch64' : ''}`;
 }
 
-function cacheDirectory(asset) {
-  const home = os.homedir();
-  let base;
-  if (process.platform === 'win32') base = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-  else if (process.platform === 'darwin') base = path.join(home, 'Library', 'Caches');
-  else base = process.env.XDG_CACHE_HOME || path.join(home, '.cache');
-  // Invalid relative OS cache settings must not write into the working directory.
-  if (!path.isAbsolute(base)) base = path.join(home, '.cache');
-  return path.join(base, 'veo', 'backends', RELEASE, `${process.platform}-${process.arch}`);
+function cacheDirectory(release = RELEASE) {
+  return path.join(cacheBase(), 'backends', release, `${process.platform}-${process.arch}`);
+}
+
+export { cacheDirectory as backendCacheDirectory };
+
+export function releaseUrl(release, asset) {
+  return `${RELEASE_HOST}/${release}/${asset}`;
+}
+
+export function isValidRelease(value) {
+  return typeof value === 'string' && RELEASE_PATTERN.test(value);
+}
+
+/** Path of the state file that records an explicitly installed newer backend. */
+export function backendStateFile({ env = process.env } = {}) {
+  return path.join(cacheBase({ env }), 'backend-override.json');
+}
+
+export async function readBackendOverride(stateFile = backendStateFile()) {
+  try {
+    const state = JSON.parse(await readFile(stateFile, 'utf8'));
+    return state && typeof state === 'object' && !Array.isArray(state) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeBackendOverride(state, stateFile = backendStateFile()) {
+  await mkdir(path.dirname(stateFile), { recursive: true, mode: 0o700 });
+  const temp = `${stateFile}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    await rename(temp, stateFile);
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+/** Returns true only when a recorded override was actually removed. */
+export async function clearBackendOverride(stateFile = backendStateFile()) {
+  try {
+    await rm(stateFile);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/**
+ * The explicitly installed backend only wins when it is newer than the pinned
+ * release, matches this platform's asset, and its bytes still hash to the value
+ * recorded at install time. Anything else silently falls back to the pinned
+ * release, so a tampered or truncated cache never becomes the default.
+ */
+export async function activeOverride(asset, { signal, stateFile = backendStateFile(), matchesImpl = matches } = {}) {
+  if (!asset) return null;
+  const state = await readBackendOverride(stateFile);
+  if (!state || state.asset !== asset) return null;
+  if (!isValidRelease(state.release) || !/^[a-f0-9]{64}$/.test(String(state.sha256))) return null;
+  if (compareVersions(state.release, RELEASE) <= 0) return null;
+  const file = path.join(cacheDirectory(state.release), `yt-dlp${exeSuffix()}`);
+  if (!await matchesImpl(file, state.sha256, signal)) return null;
+  return { release: state.release, asset, sha256: state.sha256, path: file };
+}
+
+/**
+ * Install a backend release that is newer than the pinned one. The expected
+ * hash must come from that release's own checksum list; the caller is
+ * responsible for the trust decision and for telling the user about it.
+ */
+export async function installBackend({ release, asset, sha256, signal, status = () => {} }) {
+  if (!isValidRelease(release)) throw new Error(`Invalid yt-dlp release: ${release}`);
+  if (!asset) throw new Error(`No standalone yt-dlp is available for ${process.platform}/${process.arch}.`);
+  if (!/^[a-f0-9]{64}$/.test(String(sha256))) throw new Error('The release checksum is missing or malformed.');
+  const directory = cacheDirectory(release);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const destination = await downloadBackend({ asset, release, expected: sha256, directory, signal, status, replace: true });
+  return { release, asset, sha256, path: destination };
+}
+
+export function exeSuffix(platform = process.platform) {
+  return platform === 'win32' ? '.exe' : '';
+}
+
+// ffprobe-static terminates the whole process for platforms it does not know,
+// so the static packages may only be required for combos it handles.
+export function staticToolsSupported(platform = process.platform, arch = process.arch) {
+  if (!['win32', 'darwin', 'linux'].includes(platform)) return false;
+  return platform !== 'darwin' || ['x64', 'arm64'].includes(arch);
+}
+
+async function isExecutable(file) {
+  if (typeof file !== 'string' || !file) return false;
+  try {
+    if (!(await stat(file)).isFile()) return false;
+    await access(file, process.platform === 'win32' ? constants.R_OK : constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Locate the first matching executable on PATH. Windows on ARM and minimal
+ * containers cannot use the bundled static binaries, so a system ffmpeg is a
+ * legitimate third source after the override and the managed cache.
+ * Git for Windows and WinGet ship ffmpeg in directories such as these but do
+ * not always extend the PATH that a Node process inherits.
+ */
+export function wellKnownMediaDirectories({ platform = process.platform, env = process.env } = {}) {
+  if (platform !== 'win32') return ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
+  const local = env.LOCALAPPDATA || '';
+  const programFiles = env.ProgramFiles || 'C:\\Program Files';
+  return [
+    local && path.join(local, 'Microsoft', 'WinGet', 'Links'),
+    local && path.join(local, 'Microsoft', 'WindowsApps'),
+    path.join(programFiles, 'ffmpeg', 'bin'),
+    'C:\\ffmpeg\\bin',
+    'C:\\ProgramData\\chocolatey\\bin',
+  ].filter(Boolean);
+}
+
+export async function findOnPath(names, { platform = process.platform, env = process.env, directories } = {}) {
+  const raw = platform === 'win32' ? env.PATH || env.Path || '' : env.PATH || '';
+  const candidates = directories || [
+    ...raw.split(platform === 'win32' ? ';' : ':').map(entry => entry.trim().replace(/^"(.*)"$/, '$1')),
+    ...wellKnownMediaDirectories({ platform, env }),
+  ];
+  const suffixes = platform === 'win32' ? ['', '.exe', '.cmd'] : [''];
+  for (const directory of candidates) {
+    if (!path.isAbsolute(directory)) continue;
+    for (const name of names) {
+      for (const suffix of suffixes) {
+        const candidate = path.join(directory, `${name}${suffix}`);
+        if (await isExecutable(candidate)) return candidate;
+      }
+    }
+  }
+  return undefined;
 }
 
 function envPath(name) {
@@ -105,20 +239,20 @@ async function publish(temp, destination, expected, signal) {
   }
 }
 
-async function acquire(asset, directory, signal, status) {
-  const destination = path.join(directory, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
-  const expected = HASHES[asset];
-  status('Checking yt-dlp…');
-  if (await matches(destination, expected, signal)) {
-    if (process.platform !== 'win32') await chmod(destination, 0o755);
-    return destination;
-  }
+/**
+ * Download one yt-dlp asset from its release and publish it only after the
+ * SHA-256 of the received bytes matched `expected`. With `replace`, an already
+ * present file is removed first, which is safe because the temp copy is fully
+ * verified before it is published.
+ */
+async function downloadBackend({ asset, release, expected, directory, signal, status, replace = false }) {
+  const destination = path.join(directory, `yt-dlp${exeSuffix()}`);
   const temp = `${destination}.${randomUUID()}.tmp`;
   const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT);
   const downloadSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  status(`Downloading yt-dlp ${RELEASE} (first use)…`);
+  status(`Downloading yt-dlp ${release}…`);
   try {
-    const response = await fetch(`${RELEASE_URL}/${asset}`, { signal: downloadSignal });
+    const response = await fetch(`${RELEASE_HOST}/${release}/${asset}`, { signal: downloadSignal });
     if (!response.ok || !response.body) {
       await response.body?.cancel();
       throw new Error(`yt-dlp download failed: HTTP ${response.status}.`);
@@ -140,6 +274,7 @@ async function acquire(asset, directory, signal, status) {
     await pipeline(Readable.fromWeb(response.body), verifier,
       createWriteStream(temp, { flags: 'wx', mode: 0o600 }), { signal: downloadSignal });
     if (hash.digest('hex') !== expected) throw new Error('yt-dlp SHA-256 verification failed. The download was discarded.');
+    if (replace) await rm(destination, { recursive: true, force: true });
     await publish(temp, destination, expected, downloadSignal);
     return destination;
   } catch (cause) {
@@ -149,6 +284,18 @@ async function acquire(asset, directory, signal, status) {
   } finally {
     await rm(temp, { force: true });
   }
+}
+
+async function acquire(asset, directory, signal, status) {
+  const destination = path.join(directory, `yt-dlp${exeSuffix()}`);
+  const expected = HASHES[asset];
+  status('Checking yt-dlp…');
+  if (await matches(destination, expected, signal)) {
+    if (process.platform !== 'win32') await chmod(destination, 0o755);
+    return destination;
+  }
+  status(`Downloading yt-dlp ${RELEASE} (first use)…`);
+  return downloadBackend({ asset, release: RELEASE, expected, directory, signal, status });
 }
 
 async function stage(source, destination, signal) {
@@ -168,12 +315,136 @@ async function stage(source, destination, signal) {
   }
 }
 
+async function managedMediaTools({ signal, status, directory }) {
+  if (!staticToolsSupported()) return 'the bundled static media tools do not support this platform';
+  let ffmpeg;
+  let ffprobe;
+  try {
+    ffmpeg = await executable(require('ffmpeg-static'), 'ffmpeg-static');
+    ffprobe = await executable(require('ffprobe-static').path, 'ffprobe-static');
+  } catch (cause) {
+    return `the bundled static media tools are unusable (${cause.message})`;
+  }
+  status('Preparing ffmpeg and ffprobe…');
+  const suffix = exeSuffix();
+  await stage(ffmpeg, path.join(directory, `ffmpeg${suffix}`), signal);
+  await stage(ffprobe, path.join(directory, `ffprobe${suffix}`), signal);
+  return null;
+}
+
+/**
+ * Resolve a location that contains both ffmpeg and ffprobe for
+ * --ffmpeg-location. Precedence: explicit override, bundled static binaries,
+ * then a system installation (which is what Windows on ARM needs, because
+ * ffmpeg-static and ffprobe-static ship no arm64 Windows binaries).
+ */
+async function resolveMediaTools({ signal, status, directory }) {
+  const suffix = exeSuffix();
+  const override = envPath('VEO_FFMPEG_PATH');
+  if (override) {
+    await executable(path.join(override, `ffmpeg${suffix}`), 'VEO_FFMPEG_PATH ffmpeg');
+    await executable(path.join(override, `ffprobe${suffix}`), 'VEO_FFMPEG_PATH ffprobe');
+    status('Using VEO_FFMPEG_PATH override.');
+    return override;
+  }
+  const problem = await managedMediaTools({ signal, status, directory });
+  if (!problem) return directory;
+  // A previous run may already have staged a working pair into the cache.
+  if (await isExecutable(path.join(directory, `ffmpeg${suffix}`))
+    && await isExecutable(path.join(directory, `ffprobe${suffix}`))) return directory;
+  const ffmpeg = await findOnPath(['ffmpeg']);
+  const ffprobe = await findOnPath(['ffprobe']);
+  if (!ffmpeg || !ffprobe) {
+    const missing = [!ffmpeg && 'ffmpeg', !ffprobe && 'ffprobe'].filter(Boolean).join(' and ');
+    throw new Error(`Cannot load media tools: ${problem}, and no ${missing} was found on PATH. `
+      + 'Install ffmpeg (with ffprobe) or set VEO_FFMPEG_PATH to a directory containing both binaries.');
+  }
+  // Same directory: yt-dlp can use it in place instead of duplicating ~150 MB.
+  if (path.dirname(ffmpeg) === path.dirname(ffprobe)) {
+    status(`Using the system ffmpeg in ${path.dirname(ffmpeg)}.`);
+    return path.dirname(ffmpeg);
+  }
+  status('Copying system ffmpeg and ffprobe into the backend cache…');
+  await stage(ffmpeg, path.join(directory, `ffmpeg${suffix}`), signal);
+  await stage(ffprobe, path.join(directory, `ffprobe${suffix}`), signal);
+  return directory;
+}
+
+/**
+ * Report the state of every backend component without downloading, executing,
+ * or changing anything. Used by `veo doctor`.
+ */
+export async function inspectBackend({ signal } = {}) {
+  const suffix = exeSuffix();
+  const directory = cacheDirectory();
+  const musl = process.platform === 'linux' && !process.report.getReport().header.glibcVersionRuntime;
+  const report = {
+    release: RELEASE,
+    directory,
+    platform: `${process.platform}/${process.arch}`,
+    asset: undefined,
+    override: null,
+    ytDlp: { source: 'none', present: false, verified: false },
+    ffmpeg: { source: 'missing', present: false },
+    ffprobe: { source: 'missing', present: false },
+    errors: [],
+  };
+  try {
+    const override = envPath('VEO_YT_DLP_PATH');
+    if (override) {
+      report.ytDlp = { source: 'override', path: override, present: await isExecutable(override), verified: false };
+    } else {
+      const asset = selectAsset(process.platform, process.arch, musl);
+      report.asset = asset;
+      if (!asset) {
+        report.errors.push(`No standalone yt-dlp is published for ${report.platform}.`);
+      } else {
+        report.override = await activeOverride(asset, { signal });
+        const file = report.override?.path || path.join(directory, `yt-dlp${suffix}`);
+        const present = await isExecutable(file);
+        report.ytDlp = {
+          source: report.override ? 'installed' : 'managed',
+          path: file,
+          present,
+          verified: present && await matches(file, report.override?.sha256 || HASHES[asset], signal),
+        };
+      }
+    }
+  } catch (error) {
+    report.errors.push(error.message);
+    report.ytDlp = { source: 'invalid', present: false, verified: false };
+  }
+  let override;
+  try {
+    override = envPath('VEO_FFMPEG_PATH');
+  } catch (error) {
+    report.errors.push(error.message);
+  }
+  for (const name of ['ffmpeg', 'ffprobe']) {
+    const cached = path.join(directory, `${name}${suffix}`);
+    let entry;
+    if (override) {
+      const file = path.join(override, `${name}${suffix}`);
+      entry = { source: 'override', path: file, present: await isExecutable(file) };
+    } else if (await isExecutable(cached)) {
+      entry = { source: 'cache', path: cached, present: true };
+    } else {
+      const found = await findOnPath([name]);
+      entry = { source: found ? 'path' : 'missing', path: found, present: Boolean(found) };
+    }
+    report[name] = entry;
+  }
+  return report;
+}
+
 /**
  * Resolve native tools without executing them or using a shell.
  * VEO_YT_DLP_PATH: trusted executable file; bypasses acquisition/pinned hash checks.
  * VEO_FFMPEG_PATH: directory containing both ffmpeg[.exe] and ffprobe[.exe].
- * Relative overrides resolve against cwd; no PATH search or install-time custom hook.
- * ffmpeg-static's own FFMPEG_BIN override is honored by its normal module API.
+ * Relative overrides resolve against cwd. ffmpeg-static's own FFMPEG_BIN
+ * override is honored through its normal module API.
+ * Media tools fall back to a system installation when the static packages
+ * cannot serve the current platform (notably Windows on ARM).
  * onStatus receives plain strings. Throws on cancellation or acquisition failure.
  */
 export async function resolveBackend({ signal, onStatus } = {}) {
@@ -182,42 +453,21 @@ export async function resolveBackend({ signal, onStatus } = {}) {
   signal?.throwIfAborted();
   const status = onStatus || (() => {});
   const ytOverride = envPath('VEO_YT_DLP_PATH');
-  const ffOverride = envPath('VEO_FFMPEG_PATH');
   // Diagnostic reports expose glibc when linked against it; no shell probe needed.
   const musl = process.platform === 'linux' && !process.report.getReport().header.glibcVersionRuntime;
   const asset = ytOverride ? undefined : selectAsset(process.platform, process.arch, musl);
   if (!ytOverride && !asset) throw new Error(`No standalone yt-dlp is available for ${process.platform}/${process.arch}. Set VEO_YT_DLP_PATH to a trusted executable.`);
   // Validate overrides and dependencies before doing any network work.
-  let ytDlp = ytOverride ? await executable(ytOverride, 'VEO_YT_DLP_PATH') : undefined;
-  const suffix = process.platform === 'win32' ? '.exe' : '';
-  let ffmpeg;
-  let ffprobe;
-  if (ffOverride) {
-    await executable(path.join(ffOverride, `ffmpeg${suffix}`), 'VEO_FFMPEG_PATH ffmpeg');
-    await executable(path.join(ffOverride, `ffprobe${suffix}`), 'VEO_FFMPEG_PATH ffprobe');
-  } else {
-    // ffprobe-static exits the process on unsupported OSes/arches: guard before require.
-    if (!['win32', 'darwin', 'linux'].includes(process.platform)
-      || (process.platform === 'darwin' && !['x64', 'arm64'].includes(process.arch))
-      || (process.platform === 'win32' && process.arch === 'arm64')) {
-      throw new Error('Static media tools do not support this platform. Set VEO_FFMPEG_PATH to a directory containing ffmpeg and ffprobe.');
-    }
-    try {
-      ffmpeg = await executable(require('ffmpeg-static'), 'ffmpeg-static');
-      ffprobe = await executable(require('ffprobe-static').path, 'ffprobe-static');
-    } catch (cause) {
-      throw new Error(`Cannot load media tools: ${cause.message} Install ffmpeg-static and ffprobe-static, or set VEO_FFMPEG_PATH to a directory containing both binaries.`, { cause });
-    }
-  }
-  const directory = cacheDirectory(asset);
-  if (!ytOverride || !ffOverride) await mkdir(directory, { recursive: true, mode: 0o700 });
-  if (!ytDlp) ytDlp = await acquire(asset, directory, signal, status);
-  else status('Using VEO_YT_DLP_PATH override.');
-  if (!ffOverride) {
-    status('Preparing ffmpeg and ffprobe…');
-    await stage(ffmpeg, path.join(directory, `ffmpeg${suffix}`), signal);
-    await stage(ffprobe, path.join(directory, `ffprobe${suffix}`), signal);
-  } else status('Using VEO_FFMPEG_PATH override.');
+  const ytDlp = ytOverride ? await executable(ytOverride, 'VEO_YT_DLP_PATH') : undefined;
+  // An explicitly installed newer backend takes precedence over the pinned one.
+  // Media tools stay in the pinned release directory so they are never duplicated.
+  const installed = ytDlp ? null : await activeOverride(asset, { signal });
+  const directory = cacheDirectory();
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const ffmpegLocation = await resolveMediaTools({ signal, status, directory });
+  if (ytDlp) status('Using VEO_YT_DLP_PATH override.');
+  else if (installed) status(`Using the installed yt-dlp ${installed.release}.`);
+  const backend = ytDlp || installed?.path || await acquire(asset, directory, signal, status);
   signal?.throwIfAborted();
-  return { ytDlp, ffmpegLocation: ffOverride || directory };
+  return { ytDlp: backend, ffmpegLocation };
 }

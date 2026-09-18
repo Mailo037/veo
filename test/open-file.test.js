@@ -11,7 +11,7 @@ test('--open combines with rename and audio without changing defaults', () => {
   assert.equal(options.open, true);
   assert.equal(options.rename, 'Meine Musik');
   assert.equal(options.audio, true);
-  assert.equal(parseCli([url]).open, undefined);
+  assert.equal(parseCli([url]).open, false);
   assert.match(HELP, /--open/);
 });
 

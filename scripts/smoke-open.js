@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,21 @@ import ffmpeg from 'ffmpeg-static';
 
 const cli = fileURLToPath(new URL('../bin/veo.js', import.meta.url));
 const root = await mkdtemp(path.join(os.tmpdir(), 'veo-open-'));
+
+// The detached opener inherits the CLI's working directory, so Windows keeps
+// that directory busy for a moment after the assertions have already passed.
+async function cleanup(target) {
+  for (let attempt = 0; attempt < 15; attempt++) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error;
+      await delay(200);
+    }
+  }
+  console.warn(`Note: ${target} could not be removed because a detached opener still holds it.`);
+}
 function run(command, args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: root, stdio: 'inherit', shell: false, env });
@@ -60,5 +76,5 @@ require('node:module').syncBuiltinESMExports();
   console.log(`PASS: CLI requested ${launch.command} ${JSON.stringify(launch.args)} after saving; replacement subprocess launched (PID ${launch.pid}).`);
 } finally {
   if (server) await new Promise(resolve => server.close(resolve));
-  await rm(root, { recursive: true, force: true });
+  await cleanup(root);
 }

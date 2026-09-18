@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
-import { RELEASE } from './backend.js';
+import { RELEASE, readBackendOverride } from './backend.js';
+import { cacheBase } from './paths.js';
+import { compareVersions } from './version.js';
 import { readableError } from './utils.js';
+
+export { compareVersions };
 
 const PACKAGE = '@mailo037/veo';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -24,40 +27,6 @@ export function defaultRegistry(env = process.env) {
   const registry = env.VEO_REGISTRY || env.npm_config_registry;
   if (typeof registry === 'string' && /^https?:\/\//.test(registry.trim())) return registry.trim().replace(/\/+$/, '');
   return 'https://registry.npmjs.org';
-}
-
-export function compareVersions(a, b) {
-  const parse = value => {
-    const [core, pre = ''] = String(value).trim().replace(/^v/, '').split('-');
-    if (!/^\d+(\.\d+)*$/.test(core)) throw new Error(`Invalid version: ${value}`);
-    // Semver prerelease identifiers compare per segment, numerically when numeric.
-    return { parts: core.split('.').map(Number), pre: pre === '' ? [] : pre.split('.') };
-  };
-  const left = parse(a);
-  const right = parse(b);
-  for (let index = 0; index < Math.max(left.parts.length, right.parts.length); index++) {
-    const difference = (left.parts[index] || 0) - (right.parts[index] || 0);
-    if (difference) return Math.sign(difference);
-  }
-  // A release outranks any prerelease of the same core version.
-  if (!left.pre.length && !right.pre.length) return 0;
-  if (!left.pre.length) return 1;
-  if (!right.pre.length) return -1;
-  for (let index = 0; index < Math.max(left.pre.length, right.pre.length); index++) {
-    const l = left.pre[index];
-    const r = right.pre[index];
-    if (l === undefined) return -1;
-    if (r === undefined) return 1;
-    const lNumeric = /^\d+$/.test(l);
-    const rNumeric = /^\d+$/.test(r);
-    if (lNumeric && rNumeric) {
-      const difference = Number(l) - Number(r);
-      if (difference) return Math.sign(difference);
-    } else if (lNumeric) return -1; // Numeric identifiers rank below alphanumerics.
-    else if (rNumeric) return 1;
-    else if (l !== r) return l < r ? -1 : 1;
-  }
-  return 0;
 }
 
 export async function fetchLatestVersion({ registry = defaultRegistry(), fetchImpl = fetch, timeoutMs = 8000, signal } = {}) {
@@ -81,14 +50,9 @@ export async function fetchLatestVersion({ registry = defaultRegistry(), fetchIm
   return version;
 }
 
-// Same OS cache base as the yt-dlp backend cache (see src/backend.js).
-export function veoCacheBase({ platform = process.platform, env = process.env, home = os.homedir() } = {}) {
-  let base;
-  if (platform === 'win32') base = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-  else if (platform === 'darwin') base = path.join(home, 'Library', 'Caches');
-  else base = env.XDG_CACHE_HOME || path.join(home, '.cache');
-  if (!path.isAbsolute(base)) base = path.join(home, '.cache');
-  return path.join(base, 'veo');
+// Same OS cache root as the yt-dlp backend cache (see src/paths.js).
+export function veoCacheBase(options) {
+  return cacheBase(options);
 }
 
 export async function readState(stateFile) {
@@ -139,8 +103,10 @@ export async function maybeUpdateNotice({
   return message;
 }
 
-// Removes yt-dlp caches from older pinned releases; only the current one stays.
-export async function pruneBackendCaches({ keep, root, platform = process.platform, env = process.env } = {}) {
+// Removes yt-dlp caches from older pinned releases; only the releases still in
+// use stay (the pinned one plus an explicitly installed newer backend).
+export async function pruneBackendCaches({ keep, extra = [], root, platform = process.platform, env = process.env } = {}) {
+  const retained = new Set([keep, ...extra].filter(Boolean));
   const base = root || path.join(veoCacheBase({ platform, env }), 'backends');
   let entries;
   try {
@@ -151,7 +117,7 @@ export async function pruneBackendCaches({ keep, root, platform = process.platfo
   }
   let removed = 0;
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === keep) continue;
+    if (!entry.isDirectory() || retained.has(entry.name)) continue;
     await rm(path.join(base, entry.name), { recursive: true, force: true });
     removed++;
   }
@@ -195,6 +161,7 @@ export async function updateMain(args, {
   current,
   keep = RELEASE,
   pruneRoot = undefined,
+  activeBackend,
 } = {}) {
   current = current ?? await packageVersion();
   const isCheckCommand = args[0] === 'check';
@@ -238,7 +205,9 @@ export async function updateMain(args, {
     stdout.write(`${currentText} is up to date.\n`);
   }
   try {
-    const removed = await pruneBackendCaches({ keep, root: pruneRoot });
+    // An explicitly installed backend release must survive the pruning.
+    const installed = activeBackend !== undefined ? activeBackend : (await readBackendOverride())?.release;
+    const removed = await pruneBackendCaches({ keep, extra: [installed], root: pruneRoot });
     if (removed) stdout.write(`Removed ${removed} old backend cache${removed === 1 ? '' : 's'}.\n`);
   } catch {
     // Cosmetic housekeeping must never fail the update.

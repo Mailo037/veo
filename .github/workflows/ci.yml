@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Unit tests
+        run: npm test
+      # Real end-to-end downloads through the actual CLI and yt-dlp backend.
+      # A failure here is a release blocker, not flakiness to ignore.
+      - name: End-to-end download test
+        if: matrix.node == 22
+        run: npm run test:smoke
+      - name: Published package contents
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          npm pack
+          npm run check:package

@@ -1,6 +1,6 @@
 {
   "name": "@mailo037/veo",
-  "version": "1.0.2",
+  "version": "1.2.0",
   "description": "A clean, simple video downloader powered by yt-dlp.",
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "bin/",
     "src/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
@@ -19,6 +20,7 @@
     "test": "node --test",
     "test:smoke": "node scripts/smoke.js",
     "test:open": "node scripts/smoke-open.js",
+    "check:package": "node scripts/check-package.js",
     "prepublishOnly": "npm test"
   },
   "keywords": [
@@ -26,9 +28,21 @@
     "video",
     "downloader",
     "yt-dlp",
-    "audio"
+    "audio",
+    "youtube",
+    "playlist",
+    "subtitles"
   ],
   "license": "MIT",
+  "author": "Mailo037",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mailo037/veo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mailo037/veo/issues"
+  },
+  "homepage": "https://github.com/Mailo037/veo#readme",
   "preferGlobal": true,
   "publishConfig": {
     "access": "public"

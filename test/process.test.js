@@ -22,7 +22,7 @@ test('help and version run without acquiring or resolving a backend', async () =
   for (const arg of ['--version', '-v', 'version']) {
     const version = await invoke([arg]);
     assert.equal(version.code, 0);
-    assert.equal(version.stdout, '1.0.2\n');
+    assert.equal(version.stdout, '1.2.0\n');
     assert.equal(version.stderr, '');
   }
 });
