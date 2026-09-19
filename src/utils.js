@@ -145,7 +145,7 @@ export async function allocate(source, destination, { linkImpl = link, copyImpl 
   }
 }
 
-export async function saveUnique(source, directory, title, { signal } = {}) {
+export async function saveUnique(source, directory, title, { signal, keepSource = false } = {}) {
   const extension = path.extname(source).toLowerCase();
   if (!/^\.[a-z0-9]{1,8}$/.test(extension)) throw new Error('The backend returned an invalid output extension.');
   const name = sanitizeTitle(title);
@@ -155,7 +155,7 @@ export async function saveUnique(source, directory, title, { signal } = {}) {
     if (!await allocate(source, destination)) continue;
     // The destination keeps the content, so a failing unlink only leaves a
     // second name that the caller's staging cleanup removes.
-    await unlink(source).catch(() => {});
+    if (!keepSource) await unlink(source).catch(() => {});
     return destination;
   }
 }

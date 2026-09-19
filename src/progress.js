@@ -24,14 +24,33 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
   let name = '';
   let phase = 'Starting…';
   let started = false;
+  let position = '';
+  let streamName = '';
   const updateTitle = () => setTitle(`veo | ${phase}${name ? ` | ${name}` : ''}`);
   function clear() {
     if (active && stream.isTTY) stream.write('\r\x1b[2K');
     active = false;
   }
   return {
+    item(index, total, title) {
+      clear(); position = `[${index}/${total}] `; name = cleanText(title); streamName = ''; lastLog = 0;
+      stream.write(`${position}${name}\n`);
+      phase = 'Starting…'; if (started) updateTitle();
+    },
+    processing(data) {
+      const processor = cleanText(data.postprocessor || 'Processing');
+      const labels = { Merger: 'Merging audio/video', VideoConvertor: 'Converting video', ExtractAudio: 'Converting audio', EmbedSubtitle: 'Embedding subtitles', Metadata: 'Writing metadata', EmbedThumbnail: 'Embedding thumbnail', MoveFiles: 'Preparing saved file' };
+      const label = labels[processor] || 'Processing media';
+      clear(); phase = `${label}${data.status === 'finished' ? ': done' : '…'}`;
+      if (started) updateTitle();
+      stream.write(`${position}${phase}\n`);
+    },
     start(title = '') { started = true; name = cleanText(title); phase = 'Starting…'; updateTitle(); },
-    name(title) { name = cleanText(title); if (started) updateTitle(); },
+    name(title) {
+      const next = cleanText(title);
+      if (position && next !== name) { clear(); stream.write(`${position}${next}\n`); }
+      name = next; if (started) updateTitle();
+    },
     status(message) {
       clear();
       phase = cleanText(message);
@@ -41,16 +60,20 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     complete() { clear(); phase = 'Done'; if (started) updateTitle(); },
     fail(cancelled = false) { clear(); phase = cancelled ? 'Cancelled' : 'Failed'; if (started) updateTitle(); },
     progress(data) {
+      if (data.stream && data.stream !== streamName) {
+        clear(); streamName = data.stream; lastLog = 0;
+        stream.write(`${position}${streamName} download\n`);
+      }
       const total = data.total_bytes || data.total_bytes_estimate;
       const percent = Number.isFinite(total) && total > 0 && Number.isFinite(data.downloaded_bytes)
         ? Math.max(0, Math.min(100, Math.round(data.downloaded_bytes / total * 100))) : null;
       phase = data.status === 'finished' ? 'Processing…' : percent === null ? 'Downloading…' : `${percent}%`;
       if (started) updateTitle();
       if (stream.isTTY) {
-        stream.write(`\r\x1b[2K${formatProgress(data)}`);
+        stream.write(`\r\x1b[2K${position}${streamName ? `${streamName} ` : ''}${formatProgress(data)}`);
         active = true;
       } else if (Date.now() - lastLog >= 5000 || data.status === 'finished') {
-        stream.write(`${formatProgress(data)}\n`);
+        stream.write(`${position}${streamName ? `${streamName} ` : ''}${formatProgress(data)}\n`);
         lastLog = Date.now();
       }
     },

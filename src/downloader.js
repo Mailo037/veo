@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { lstat, mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveBackend } from './backend.js';
 import { availableHeights, cappedHeight, closestHeight, saveUnique, sanitizeTitle } from './utils.js';
+import { digest, readJson, writeJson } from './state.js';
+import { selectedEntries, sizeEstimate, describeEstimate } from './playlist.js';
 
 const STAGING_PREFIX = '.veo-';
 const PARTIAL_PREFIX = '.veo-part-';
@@ -26,6 +27,12 @@ export function runBackend(executable, args, { signal, onLine } = {}) {
     let errors = '';
     let failure;
     const lines = createInterface({ input: child.stdout });
+    const errorLines = createInterface({ input: child.stderr });
+    errorLines.on('line', line => {
+      if (onLine && /^veo-(?:progress|postprocess):/.test(line)) {
+        try { onLine(line); } catch (error) { failure = error; child.kill(); }
+      }
+    });
     lines.on('line', line => {
       if (onLine) {
         try { onLine(line); } catch (error) { failure = error; child.kill(); }
@@ -36,6 +43,7 @@ export function runBackend(executable, args, { signal, onLine } = {}) {
     child.on('error', error => { failure = error; });
     child.on('close', code => {
       lines.close();
+      errorLines.close();
       if (failure) reject(failure);
       else if (signal?.aborted) reject(new DOMException('Cancelled', 'AbortError'));
       else if (code !== 0) reject(new Error(errors || `Downloading backend exited with code ${code}.`));
@@ -102,10 +110,20 @@ export function selectQuality({ quality = 'best', audio = false, closest = false
  * A stable, filesystem-safe key for one video, so a re-run with --resume finds
  * the same staging directory. Site ids are untrusted input and never used raw.
  */
-export function partialKey(metadata, url) {
-  const id = String(metadata?.id ?? '').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
-  if (id) return id;
-  return createHash('sha256').update(String(url)).digest('hex').slice(0, 16);
+export function partialKey(metadata, url, options = {}) {
+  return digest({ source: sourceKey(metadata, url), settings: downloadSettings(options) });
+}
+
+function sourceKey(metadata, url) {
+  return metadata.id && (metadata.extractor_key || metadata.extractor)
+    ? `${metadata.extractor_key || metadata.extractor}:${metadata.id}` : `${url}#${metadata.id || ''}`;
+}
+
+function downloadSettings(options) {
+  options = { quality: 'best', audio: false, closestQuality: false, subs: false, embedSubs: false,
+    embedMetadata: false, embedThumbnail: false, ...options };
+  return Object.fromEntries(['quality', 'audio', 'format', 'closestQuality', 'subs', 'subLangs', 'embedSubs',
+    'embedMetadata', 'embedThumbnail', 'sponsorblockRemove', 'section'].map(key => [key, options[key] ?? null]));
 }
 
 /**
@@ -168,6 +186,7 @@ function backendArgs(options, backend) {
     '--no-js-runtimes', '--js-runtimes', `node:${process.execPath}`,
     '--ffmpeg-location', backend.ffmpegLocation];
   if (!options.playlist) common.push('--no-playlist');
+  if (options._entryIndex) common.push('--playlist-items', String(options._entryIndex));
   if (options.concurrentFragments) common.push('--concurrent-fragments', String(options.concurrentFragments));
   // Credentials are opt-in per invocation and only ever forwarded to the backend,
   // which never bypasses access controls on its own.
@@ -179,7 +198,8 @@ function backendArgs(options, backend) {
 function mediaArgs(options, quality) {
   const args = ['--no-overwrites', options.resume ? '--continue' : '--no-continue', '--newline',
     '--progress', '--progress-delta', '0.2',
-    '--progress-template', 'download:veo-progress:%(progress)j',
+    '--progress-template', 'download:veo-progress:{"progress":%(progress)j,"video":%(info.vcodec|null)j,"audio":%(info.acodec|null)j}',
+    '--progress-template', 'postprocess:veo-postprocess:%(progress)j',
     '--print', 'after_move:veo-file:%(filepath)j', '--no-simulate'];
   if (options.audio) args.push('-f', 'ba/b', '--extract-audio', '--audio-format', options.format || 'mp3', '--audio-quality', '0');
   else {
@@ -192,7 +212,8 @@ function mediaArgs(options, quality) {
   const sort = ['vcodec:h264,acodec:aac', quality.sort].filter(Boolean).join(',');
   // Codec preference only applies when the source container is kept; a
   // deliberate conversion should start from the best source available.
-  if (!options.audio && sort) args.push('-S', options.format ? quality.sort : sort);
+  const selectedSort = options.format ? quality.sort : sort;
+  if (!options.audio && selectedSort) args.push('-S', selectedSort);
   if (options.subs || options.subLangs || options.embedSubs) {
     args.push('--write-subs', '--sub-langs', options.subLangs || 'en.*,en');
   }
@@ -214,13 +235,15 @@ export async function fetchMetadata(options, { signal, backend, runner, reporter
   const common = backendArgs(options, backend);
   reporter?.status('Reading video…');
   const args = [...common, '--dump-single-json', '--skip-download'];
-  if (options.playlist) args.push('--flat-playlist');
+  if (options.playlist && !options._entryIndex) args.push('--flat-playlist');
   args.push('--', options.url);
-  const metadata = JSON.parse(await runner(backend.ytDlp, args, { signal }));
+  let metadata = JSON.parse(await runner(backend.ytDlp, args, { signal }));
+  if (options._entryIndex && metadata.entries) metadata = metadata.entries.find(Boolean);
+  if (!metadata) throw new Error('The selected playlist entry is unavailable.');
   if (!options.playlist && (metadata._type === 'playlist' || metadata.entries)) {
     throw new Error('This URL is a collection. Add --playlist to download every entry.');
   }
-  if (!options.playlist && metadata.is_live) throw new Error('Live streams are not supported. Please use a finished video.');
+  if (metadata.is_live) throw new Error('Live streams are not supported. Please use a finished video.');
   if (metadata.has_drm) throw new Error('This content is DRM-protected.');
   return metadata;
 }
@@ -261,49 +284,114 @@ export async function planDownload(options, { signal, backendResolver = resolveB
   const metadata = await fetchMetadata(options, { signal, backend, runner, reporter });
   const quality = selectQuality({ quality: options.quality, audio: options.audio, closest: options.closestQuality, formats: metadata.formats, playlist: options.playlist });
   if (quality.error) throw new Error(quality.error);
+  const selected = metadata.entries ? selectedEntries(metadata, options.playlistItems) : [{ entry: metadata, index: 1 }];
   const titles = options.playlist && metadata.entries?.length
-    ? metadata.entries.map((entry, index) => entry.title || `${metadata.title || 'video'} - ${index + 1}`)
+    ? selected.map(({ entry, index }) => options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : entry?.title || `${metadata.title || 'video'} - ${index}`)
     : [options.rename ?? (metadata.title || metadata.id || 'video')];
   const extension = predictedExtension(options);
-  const exists = async candidate => Boolean(await stat(candidate).catch(() => undefined));
+  const reserved = new Set();
+  const exists = async candidate => reserved.has(candidate) || Boolean(await stat(candidate).catch(() => undefined));
   const planned = [];
-  for (const title of titles) planned.push({ title, path: await previewPath(directory, title, extension, { exists }) });
-  return { url: options.url, playlist: Boolean(options.playlist), quality: quality.label, entries: planned };
+  for (const title of titles) {
+    const target = await previewPath(directory, title, extension, { exists });
+    reserved.add(target);
+    planned.push({ title, path: target });
+  }
+  return { url: options.url, playlist: Boolean(options.playlist), quality: quality.label, entries: planned, ...sizeEstimate(selected) };
+}
+
+async function downloadCollection(options, metadata, dependencies) {
+  const { reporter, signal } = dependencies;
+  const entries = selectedEntries(metadata, options.playlistItems);
+  reporter?.status(describeEstimate(sizeEstimate(entries)));
+  const files = [], failures = [];
+  let saved = 0, skipped = 0;
+  for (const [offset, { entry, index }] of entries.entries()) {
+    signal?.throwIfAborted();
+    reporter?.item?.(offset + 1, entries.length, entry?.title || `Entry ${index}`);
+    const itemOptions = { ...options, _entryIndex: index,
+      rename: options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : undefined };
+    try {
+      const result = await download(itemOptions, dependencies);
+      files.push(...result.files);
+      if (result.status === 'skipped') skipped++; else saved++;
+      await dependencies.onEntry?.({ index, status: result.status || 'saved', files: result.files });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      failures.push({ index, error: error.message });
+      reporter?.status(`Entry ${index} failed: ${error.message}`);
+      await dependencies.onEntry?.({ index, status: 'failed', error: error.message });
+    }
+  }
+  return { url: options.url, title: metadata.title || metadata.id || 'Playlist', files, saved, skipped, failures,
+    status: failures.length ? 'failed' : saved ? 'saved' : 'skipped' };
 }
 
 /**
  * Download one URL. Returns every file that was saved, in the order the
  * backend produced them, so collections and subtitle sidecars are reported.
  */
-export async function download(options, { signal, reporter, backendResolver = resolveBackend, runner = runBackend } = {}) {
+export async function download(options, { signal, reporter, backendResolver = resolveBackend, runner = runBackend, onEntry } = {}) {
   const directory = path.resolve(options.output);
   await mkdir(directory, { recursive: true });
   const backend = await prepareBackend(options, { signal, backendResolver, reporter });
   const metadata = await fetchMetadata(options, { signal, backend, runner, reporter });
-  const playlist = Boolean(options.playlist);
+  if (metadata.entries && !options._entryIndex) return downloadCollection(options, metadata, { signal, reporter, backendResolver: async () => backend, runner, onEntry });
+  const playlist = false;
   reporter?.name?.(options.rename ?? (metadata.title || metadata.id || 'video'));
   const quality = selectQuality({ quality: options.quality, audio: options.audio, closest: options.closestQuality, formats: metadata.formats, playlist });
   if (quality.error) throw new Error(quality.error);
   if (quality.label) reporter?.status(quality.label);
 
-  const staging = await prepareStaging(directory, options.resume ? path.join(directory, `${PARTIAL_PREFIX}${partialKey(metadata, options.url)}`) : undefined);
+  const key = partialKey(metadata, options.url, options);
+  const historyFile = path.join(directory, '.veo-history', `${key}.json`);
+  const history = options.skipExisting || (options.resume && options._entryIndex) ? await readJson(historyFile, null) : null;
+  if (history?.files?.length && history.files.every(file => typeof file === 'string' && path.dirname(file) === directory) && (await Promise.all(history.files.map(file => stat(file).then(info => info.isFile(), () => false)))).every(Boolean)) {
+    reporter?.status('Already downloaded; skipped.');
+    return { url: options.url, title: metadata.title, files: [], status: 'skipped', saved: 0, skipped: 1 };
+  }
+  const staging = await prepareStaging(directory, options.resume ? path.join(directory, `${PARTIAL_PREFIX}${key}`) : undefined);
+  const lockPath = path.join(staging, '.lock');
+  let lock;
+  try { lock = await open(lockPath, 'wx'); }
+  catch (error) {
+    if (error.code === 'EEXIST') throw new Error(`This download is already active, or a force-killed process left ${lockPath}. Remove that lock only after checking that no other veo process uses it.`);
+    throw error;
+  }
+  const manifestFile = path.join(staging, 'job.json');
   let keepPartial = false;
   try {
-    let staged = [];
-    if (options.resume) {
-      const finished = await findFinishedMedia(staging);
-      if (finished) {
-        staged = [finished];
-        reporter?.status('Saving the finished partial download…');
-      }
+    const manifest = await readJson(manifestFile, { version: 1, key, source: sourceKey(metadata, options.url), settings: downloadSettings(options), ready: [], files: [] });
+    if (manifest.key !== key || manifest.version !== 1) throw new Error('Partial download belongs to different settings.');
+    if (!Array.isArray(manifest.ready) || !Array.isArray(manifest.files)
+      || manifest.ready.some(file => typeof file !== 'string' || path.dirname(file) !== staging || !isStagedMedia(path.basename(file)))
+      || manifest.files.some(item => typeof item?.source !== 'string' || path.dirname(item.source) !== staging || typeof item.destination !== 'string' || path.dirname(item.destination) !== directory)) {
+      throw new Error('Invalid partial download manifest.');
     }
+    await writeJson(manifestFile, manifest);
+    // Only an after_move event proves that all postprocessing completed.
+    let staged = [...new Set(manifest.ready)];
     if (!staged.length) {
-      const args = [...backendArgs(options, backend), ...mediaArgs(options, quality), '-o', stagingTemplate(staging, playlist), '--', options.url];
+      const args = [...backendArgs(options, backend), ...mediaArgs(options, quality), '-o', stagingTemplate(staging, false), '--', options.url];
       reporter?.status(options.audio ? 'Downloading audio…' : 'Downloading…');
-      await runner(backend.ytDlp, args, { signal, onLine(line) {
-        if (line.startsWith('veo-progress:')) reporter?.progress(JSON.parse(line.slice('veo-progress:'.length)));
-        if (line.startsWith('veo-file:')) staged.push(JSON.parse(line.slice('veo-file:'.length)));
-      } });
+      let writes = Promise.resolve();
+      try {
+        await runner(backend.ytDlp, args, { signal, onLine(line) {
+          if (line.startsWith('veo-progress:')) {
+            const data = JSON.parse(line.slice('veo-progress:'.length));
+            reporter?.progress(data.progress ? { ...data.progress, stream: data.video === 'none' ? 'Audio' : data.audio === 'none' ? 'Video' : 'Media' } : data);
+          }
+          if (line.startsWith('veo-postprocess:')) reporter?.processing?.(JSON.parse(line.slice('veo-postprocess:'.length)));
+          if (line.startsWith('veo-file:')) {
+            const file = JSON.parse(line.slice('veo-file:'.length));
+            if (path.dirname(path.resolve(file)) !== staging || !isStagedMedia(path.basename(file))) throw new Error('The backend returned an invalid saved file path.');
+            staged.push(file);
+            manifest.ready.push(file);
+            writes = writes.then(() => writeJson(manifestFile, manifest));
+            writes.catch(() => {});
+          }
+        } });
+      } finally { await writes; }
     }
     // Cancellation must win over any follow-up error so the caller can report
     // "Cancelled." instead of a confusing backend message.
@@ -311,21 +399,32 @@ export async function download(options, { signal, reporter, backendResolver = re
     if (!staged.length) throw new Error('The backend finished without producing a file.');
 
     const files = [];
+    reporter?.status('Saving…');
     for (const stagedFile of staged) {
       const resolved = path.resolve(stagedFile);
       // The backend must only ever hand back a file inside our staging directory.
-      if (path.dirname(resolved) !== staging || !(await stat(resolved)).isFile()) throw new Error('The backend returned an invalid saved file path.');
-      const saved = await saveUnique(resolved, directory, stagedTitle(resolved, metadata, options.rename), { signal });
+      if (path.dirname(resolved) !== staging || !(await lstat(resolved)).isFile()) throw new Error('The backend returned an invalid saved file path.');
+      let record = manifest.files.find(item => item.source === resolved);
+      if (record && !await stat(record.destination).then(info => info.isFile(), () => false)) record = null;
+      const saved = record?.destination || await saveUnique(resolved, directory, stagedTitle(resolved, metadata, options.rename), { signal, keepSource: true });
+      if (!record) {
+        manifest.files = manifest.files.filter(item => item.source !== resolved);
+        manifest.files.push({ source: resolved, destination: saved });
+        await writeJson(manifestFile, manifest);
+      }
       files.push(saved);
-      files.push(...await saveSidecars(staging, resolved, saved, { signal }));
+      files.push(...await saveSidecars(staging, resolved, saved, { signal, manifest, manifestFile }));
     }
-    return { url: options.url, title: metadata.title || metadata.id || 'video', files };
+    await writeJson(historyFile, { version: 1, source: sourceKey(metadata, options.url), settings: downloadSettings(options), files });
+    return { url: options.url, title: metadata.title || metadata.id || 'video', files, status: 'saved', saved: 1, skipped: 0 };
   } catch (error) {
     // A kept staging directory is the whole point of --resume, and cancellation
     // is the most common reason to want one.
     keepPartial = Boolean(options.resume);
     throw error;
   } finally {
+    await lock.close();
+    await rm(lockPath, { force: true });
     reporter?.finish();
     if (keepPartial) reporter?.status(`Partial download kept in ${staging}. Re-run with --resume to continue it, or delete the folder.`);
     else await rm(staging, { recursive: true, force: true });
@@ -337,7 +436,7 @@ export async function download(options, { signal, reporter, backendResolver = re
  * media name as the prefix (Title.mp4 -> Title.en.vtt). Collections pair each
  * file with the sidecars that share its index.
  */
-async function saveSidecars(staging, stagedMedia, savedMedia, { signal } = {}) {
+async function saveSidecars(staging, stagedMedia, savedMedia, { signal, manifest, manifestFile } = {}) {
   const written = [];
   const stem = path.basename(stagedMedia, path.extname(stagedMedia));
   const base = path.basename(savedMedia, path.extname(savedMedia));
@@ -345,7 +444,17 @@ async function saveSidecars(staging, stagedMedia, savedMedia, { signal } = {}) {
   for (const entry of entries) {
     if (!entry.isFile() || !isSidecar(entry.name) || !entry.name.startsWith(`${stem}.`)) continue;
     const suffix = path.basename(entry.name, path.extname(entry.name)).slice(stem.length);
-    written.push(await saveUnique(path.join(staging, entry.name), path.dirname(savedMedia), `${base}${suffix}`, { signal }));
+    const source = path.join(staging, entry.name);
+    const record = manifest.files.find(item => item.source === source);
+    if (record && await stat(record.destination).then(info => info.isFile(), () => false)) {
+      written.push(record.destination);
+      continue;
+    }
+    const destination = await saveUnique(source, path.dirname(savedMedia), `${base}${suffix}`, { signal, keepSource: true });
+    manifest.files = manifest.files.filter(item => item.source !== source);
+    manifest.files.push({ source, destination });
+    await writeJson(manifestFile, manifest);
+    written.push(destination);
   }
   return written;
 }

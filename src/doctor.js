@@ -171,7 +171,7 @@ export async function collectChecks({
     systemFfmpeg && systemFfprobe ? `${path.dirname(systemFfmpeg)} (fallback)` : 'not on PATH — only needed when the bundled binaries are unavailable');
 
   const partials = await readdir(target, { withFileTypes: true }).catch(() => []);
-  const leftover = partials.filter(entry => entry.isDirectory() && entry.name.startsWith('.veo-')).map(entry => entry.name);
+  const leftover = partials.filter(entry => entry.isDirectory() && entry.name.startsWith('.veo-') && entry.name !== '.veo-history').map(entry => entry.name);
   if (leftover.length) push('warn', 'Partial data', `${leftover.length} leftover folder${leftover.length === 1 ? '' : 's'} in the output directory (${leftover.slice(0, 3).join(', ')}${leftover.length > 3 ? ', …' : ''}). Re-run with --resume to continue, or delete them.`);
   else push('ok', 'Partial data', 'no leftover download folders');
 

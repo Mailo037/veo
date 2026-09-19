@@ -2,6 +2,57 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.3.0
+
+### Added
+
+- **Interactive wizard**: run `veo` without arguments in a terminal to be guided through a
+  download — profile, link, video or audio, available resolution, output directory, and
+  playlist entry selection. It enables resume and offers to skip already downloaded files.
+  Redirected input never starts a prompt.
+- **Named profiles** in the config file (`"profiles": { "music": {...} }`) plus
+  `veo config edit|path|profiles`. Global defaults are merged first, then the profile
+  selected with `--profile`, then explicit flags.
+- **Negated boolean flags** such as `--no-open`, `--no-audio` or `--no-resume` switch off a
+  stored default for one invocation; `--no-subs` also disables stored subtitle languages
+  and subtitle embedding.
+- **URL list files** with `--batch-file <file>` (one URL per line, blank lines and `#`
+  comments ignored), combinable with URLs on the command line.
+- **Durable batch jobs and `--retry-failed <file>`**: failed or cancelled runs print a
+  ready-to-use retry command, and retries keep the resolved output directory and settings
+  even from another working directory. Completed playlist jobs retry only failed indices.
+- **A final summary** per run, counting saved, skipped and failed items. With `--open`,
+  successful files are opened even when another URL or playlist entry fails.
+- **Playlist entries one at a time**: a failed entry keeps previously saved files and does
+  not stop the remaining entries. `--playlist-items 1,3-5` selects entries by original
+  one-based index, and the selection count plus available size estimates are shown first.
+- **`--skip-existing`** reuses the recorded source and settings history and re-checks that
+  the files are still on disk. A different quality or format, or a deleted output, is
+  downloaded again.
+- **Resume by source and settings hash**: partial data lives in
+  `.veo-part-<hash>`, guarded by a lock and a manifest that records backend-confirmed
+  completion, so an unprocessed file is never mistaken for a finished video. Each playlist
+  entry has its own state; completed entries are skipped on a later run and unfinished ones
+  are preserved independently.
+- **Labelled phases** in the terminal title and progress output: current item, source title,
+  video/audio/media stream, conversion or merge, and saving.
+- **Workflow regression tests** and real-backend smoke coverage for URL lists, profiles,
+  retry, duplicate detection and playlist selection.
+
+### Changed
+
+- Generated configuration comments, the example profiles (`music`, `archive`),
+  documentation and sample filenames are English throughout. Previously generated German
+  template comments are translated by the next `veo config edit`, preserving existing
+  settings, paths and custom profile names.
+- `veo config edit` fills new or empty files with a commented template and gives existing
+  files a one-time commented reference guide, without changing stored settings. Config
+  files accept `//` line and `/* ... */` block comments.
+- Ambiguous "resume folders" are replaced by the source/settings hash layout; only
+  backend-confirmed postprocessed media is reused.
+- Other positive numeric resolutions, such as `-q 540p`, are accepted instead of only the
+  documented list.
+
 ## 1.2.0
 
 Everything below ships together: `1.1.0` was prepared but never published, so this

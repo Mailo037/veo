@@ -1,6 +1,8 @@
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { configBase } from './paths.js';
+import { CONFIG_TEMPLATE, stripConfigComments, withConfigTemplate } from './config-template.js';
 
 /**
  * Keys accepted in the config file, with the CLI flag they act as a default for.
@@ -27,6 +29,8 @@ export const CONFIG_KEYS = Object.freeze({
   sponsorblockRemove: 'string',
   section: 'string',
   json: 'boolean',
+  skipExisting: 'boolean',
+  playlistItems: 'string',
 });
 
 export function configFile({ env = process.env } = {}) {
@@ -59,7 +63,7 @@ export async function loadConfig({ env = process.env, file } = {}) {
   }
   let data;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(stripConfigComments(text));
   } catch {
     throw new Error(`The veo config file is not valid JSON: ${target}`);
   }
@@ -70,6 +74,21 @@ export async function loadConfig({ env = process.env, file } = {}) {
   const config = {};
   for (const [key, value] of Object.entries(data)) {
     if (key === '$schema') continue;
+    if (key === 'profiles') {
+      if (!value || typeOf(value) !== 'object') throw new Error('Config profiles must be an object.');
+      config.profiles = Object.create(null);
+      for (const [name, profile] of Object.entries(value)) {
+        if (!profile || typeOf(profile) !== 'object') throw new Error(`Profile "${name}" must be an object.`);
+        const checked = {};
+        for (const [setting, item] of Object.entries(profile)) {
+          if (!Object.hasOwn(CONFIG_KEYS, setting)) throw new Error(`Unknown setting "${setting}" in profile "${name}".`);
+          if (typeOf(item) !== CONFIG_KEYS[setting]) throw new Error(`Profile "${name}": "${setting}" must be a ${CONFIG_KEYS[setting]}.`);
+          checked[setting] = item;
+        }
+        config.profiles[name] = checked;
+      }
+      continue;
+    }
     const expected = CONFIG_KEYS[key];
     if (!expected) {
       warnings.push(`Unknown config key "${key}" in ${target} was ignored.`);
@@ -81,4 +100,43 @@ export async function loadConfig({ env = process.env, file } = {}) {
     config[key] = value;
   }
   return { file: target, exists: true, config, warnings };
+}
+
+export function applyProfile(config, name) {
+  const { profiles, ...defaults } = config;
+  if (!name) return defaults;
+  if (!profiles || !Object.hasOwn(profiles, name)) throw new Error(`Unknown profile "${name}". Available: ${Object.keys(profiles || {}).join(', ') || 'none'}. Use veo config edit.`);
+  return { ...defaults, ...profiles[name] };
+}
+
+export async function prepareConfigEdit(file) {
+  await mkdir(path.dirname(file), { recursive: true });
+  try { await writeFile(file, CONFIG_TEMPLATE, { flag: 'wx', mode: 0o600 }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const original = await readFile(file, 'utf8');
+    const annotated = withConfigTemplate(original);
+    if (annotated !== original) await writeFile(file, annotated, 'utf8');
+  }
+}
+
+export async function configMain(args) {
+  const file = configFile();
+  if (args.length !== 1 || !['edit', 'path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles');
+  if (args[0] === 'path') { process.stdout.write(`${file}\n`); return 0; }
+  if (args[0] === 'profiles') {
+    const loaded = await loadConfig();
+    process.stdout.write(`${Object.keys(loaded.config.profiles || {}).join('\n') || 'No profiles configured. Use veo config edit.'}\n`);
+    return 0;
+  }
+  await prepareConfigEdit(file);
+  // Treat the editor as an executable path, never as shell code.
+  const editor = process.env.VISUAL || process.env.EDITOR || (process.platform === 'win32' ? 'notepad.exe' : 'vi');
+  await new Promise((resolve, reject) => {
+    const child = spawn(editor, [file], { shell: false, stdio: 'inherit', windowsHide: true });
+    child.on('error', () => reject(new Error(`Could not launch editor. Set EDITOR to an executable path or edit ${file}.`)));
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(`Editor exited with ${code}. Config: ${file}`)));
+  });
+  await loadConfig();
+  return 0;
 }

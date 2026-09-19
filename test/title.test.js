@@ -10,8 +10,8 @@ function stream(isTTY = true) {
 
 test('rename accepts short/long flags and rejects empty names', () => {
   const url = 'https://example.com/video.mp4';
-  assert.equal(parseCli([url, '-r', 'Mein Video']).rename, 'Mein Video');
-  assert.equal(parseCli([url, '--audio', '--rename', 'Musik']).rename, 'Musik');
+  assert.equal(parseCli([url, '-r', 'My Video']).rename, 'My Video');
+  assert.equal(parseCli([url, '--audio', '--rename', 'Music']).rename, 'Music');
   for (const name of ['', '   ', '\x1b[31m\x07']) {
     assert.throws(() => parseCli([url, '-r', name]), /filename cannot be empty/);
   }
@@ -56,10 +56,10 @@ test('title API failures do not fail a download', () => {
 test('reporter titles follow name, progress, processing, and completion', () => {
   const titles = [];
   const reporter = createReporter(stream(), { setTitle: title => titles.push(title) });
-  reporter.start('Mein Video');
-  assert.equal(titles.at(-1), 'veo | Starting… | Mein Video');
+  reporter.start('My Video');
+  assert.equal(titles.at(-1), 'veo | Starting… | My Video');
   reporter.status('Reading video…');
-  assert.equal(titles.at(-1), 'veo | Reading video… | Mein Video');
+  assert.equal(titles.at(-1), 'veo | Reading video… | My Video');
   reporter.name('Original title');
   reporter.progress({ downloaded_bytes: 50, total_bytes: 100 });
   assert.equal(titles.at(-1), 'veo | 50% | Original title');

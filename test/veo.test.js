@@ -22,7 +22,7 @@ test('CLI defaults, flags, help, and version', () => {
   assert.equal(parseCli([url, '-q', '1080p', '-o', './videos', '--format', 'mp4']).quality, '1080p');
   assert.equal(parseCli([url, '--audio', '--format', 'flac']).audio, true);
   assert.equal(parseCli([url, '--resume']).resume, true);
-  assert.equal(parseCli([url, '--audio', '--rename', 'Meine Musik', '--open']).open, true);
+  assert.equal(parseCli([url, '--audio', '--rename', 'My Music', '--open']).open, true);
   assert.deepEqual(parseCli([url, url.replace('video', 'other')]).urls.length, 2);
   assert.equal(parseCli([url, '-q', '1080p', '--closest-quality']).closestQuality, true);
   assert.equal(parseCli([url, '--sub-langs', 'de,en']).subs, true);
@@ -47,7 +47,7 @@ test('config values act as defaults and explicit flags win', () => {
   assert.throws(() => parseCli([url, url, '-q', '720p'], { config: { rename: 'x' } }), /--rename only applies to a single URL/);
 });
 test('invalid and conflicting options fail before backend acquisition', () => {
-  for (const args of [[], ['foo'], [url, '-q', '999p'], [url, '--format', 'exe'], [url, '--audio', '--format', 'mp4'], [url, '--audio', '-q', '720p'], [url, '--output', ''], [url, '--unknown'], [url, '--closest-quality'], [url, '--audio', '--closest-quality'], [url, '-q', '720p', '--closest-quality', '--audio'], [url, url, '-r', 'x'], [url, '-N', '0'], [url, '-N', '99'], [url, '-N', 'zwei'], [url, '--list-formats', url], [url, '--list-formats', '--audio'], [url, '--section', 'abc'], [url, '--sponsorblock-remove', 'sponsor;rm -rf']]) assert.throws(() => parseCli(args), `should reject ${args.join(' ')}`);
+  for (const args of [[], ['foo'], [url, '-q', '0p'], [url, '--format', 'exe'], [url, '--audio', '--format', 'mp4'], [url, '--audio', '-q', '720p'], [url, '--output', ''], [url, '--unknown'], [url, '--closest-quality'], [url, '--audio', '--closest-quality'], [url, '-q', '720p', '--closest-quality', '--audio'], [url, url, '-r', 'x'], [url, '-N', '0'], [url, '-N', '99'], [url, '-N', 'two'], [url, '--list-formats', url], [url, '--list-formats', '--audio'], [url, '--section', 'abc'], [url, '--sponsorblock-remove', 'sponsor;rm -rf']]) assert.throws(() => parseCli(args), `should reject ${args.join(' ')}`);
   for (const input of ['file:///tmp/video', 'ftp://example.com/v', 'https://user:password@example.com', '--exec=echo']) assert.throws(() => validateUrl(input));
 });
 test('nearest resolution selects above or below, ties below; ignores DRM and audio', () => {

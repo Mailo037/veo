@@ -32,6 +32,6 @@ for (let offset = 0; offset + 512 <= tar.length;) {
   offset += 512 + Math.ceil(size / 512) * 512;
 }
 if (!executable) console.log(`Note: bin mode is ${binMode.toString(8)} (no Unix exec bit; expected when packing on Windows). npm chmods bin targets to 0755 on install and creates shims, so this is cosmetic.`);
-for (const file of ['package/package.json', 'package/src/cli.js', 'package/src/backend.js', 'package/src/downloader.js', 'package/README.md', 'package/CHANGELOG.md', 'package/LICENSE']) assert(names.includes(file), `Missing ${file}`);
+for (const file of ['package/package.json', 'package/src/cli.js', 'package/src/backend.js', 'package/src/downloader.js', 'package/src/interactive.js', 'package/src/jobs.js', 'package/src/playlist.js', 'package/src/state.js', 'package/README.md', 'package/CHANGELOG.md', 'package/LICENSE']) assert(names.includes(file), `Missing ${file}`);
 assert(!names.some(name => /node_modules|\/test\/|\.env|\/scripts\//.test(name)));
 console.log(`PASS: ${archive}: ${names.length} entries, shebang present, bin mode ${binMode.toString(8)} (npm sets 0755 on install), required runtime files, no development files.`);

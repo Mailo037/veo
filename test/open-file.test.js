@@ -7,9 +7,9 @@ import { parseCli, HELP } from '../src/cli.js';
 
 test('--open combines with rename and audio without changing defaults', () => {
   const url = 'https://example.com/video.mp4';
-  const options = parseCli([url, '--audio', '-r', 'Meine Musik', '--open']);
+  const options = parseCli([url, '--audio', '-r', 'My Music', '--open']);
   assert.equal(options.open, true);
-  assert.equal(options.rename, 'Meine Musik');
+  assert.equal(options.rename, 'My Music');
   assert.equal(options.audio, true);
   assert.equal(parseCli([url]).open, false);
   assert.match(HELP, /--open/);

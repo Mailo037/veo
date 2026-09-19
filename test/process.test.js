@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const cli = fileURLToPath(new URL('../bin/veo.js', import.meta.url));
+// The packaged version, so a release bump does not need a test edit.
+const { version: pkgVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 function invoke(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], { shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, VEO_YT_DLP_PATH: '/missing/backend' } });
@@ -22,7 +25,7 @@ test('help and version run without acquiring or resolving a backend', async () =
   for (const arg of ['--version', '-v', 'version']) {
     const version = await invoke([arg]);
     assert.equal(version.code, 0);
-    assert.equal(version.stdout, '1.2.0\n');
+    assert.equal(version.stdout, `${pkgVersion}\n`);
     assert.equal(version.stderr, '');
   }
 });

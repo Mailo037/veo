@@ -3,7 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { createReporter } from './progress.js';
 import { openFile } from './open-file.js';
 import { maybeUpdateNotice, updateMain, UPDATE_HELP, defaultRegistry, packageVersion } from './updater.js';
-import { loadConfig } from './config.js';
+import { applyProfile, configMain, loadConfig } from './config.js';
+import { validateItems, describeEstimate } from './playlist.js';
+import { retryOptions, runJob } from './jobs.js';
 import { QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, validateUrl, readableError, cleanText, validateCookieFile, validateBrowserSpec, cookieFileWarning } from './utils.js';
 
 export const HELP = `veo - simple video downloader
@@ -40,6 +42,12 @@ Options:
   --list-formats           Show the available formats and exit
   --dry-run                Show what would be downloaded and exit
   --json                   Print one JSON object per URL instead of prose
+  --profile <name>         Apply a named config profile
+  --batch-file <file>      Read URLs from a file (one per line; # comments)
+  --retry-failed <file>    Retry failed/unfinished items from a saved job
+  --playlist-items <list>  Select playlist entries, e.g. 1,3-5 (implies --playlist)
+  --skip-existing         Skip matching downloads still present on disk
+  --no-<boolean-option>   Disable a stored boolean default, e.g. --no-open
   -v, --version            Show installed version (also: veo version)
   -h, --help               Show help
 
@@ -48,6 +56,9 @@ Commands:
   veo backend update       Install a newer yt-dlp release (see veo backend --help)
   veo doctor               Diagnose the local setup
   veo version              Show the installed version
+  veo config edit|path|profiles  Manage defaults and named profiles
+
+Run veo without arguments in a terminal for interactive setup.
 
 Defaults can be stored in the veo config file; veo doctor prints its location.
 
@@ -74,6 +85,10 @@ const STRING_OPTIONS = {
   'sub-langs': {},
   'sponsorblock-remove': {},
   section: {},
+  profile: {},
+  'batch-file': {},
+  'retry-failed': {},
+  'playlist-items': {},
 };
 
 const BOOLEAN_OPTIONS = {
@@ -91,6 +106,7 @@ const BOOLEAN_OPTIONS = {
   json: {},
   help: { short: 'h' },
   version: { short: 'v' },
+  'skip-existing': {},
 };
 
 // Config defaults, so an explicit flag always wins but a stored preference does not.
@@ -116,6 +132,8 @@ export function optionDefaults(config = {}) {
     'embed-thumbnail': config.embedThumbnail ?? false,
     'closest-quality': config.closestQuality ?? false,
     json: config.json ?? false,
+    'skip-existing': config.skipExisting ?? false,
+    'playlist-items': config.playlistItems,
   };
 }
 
@@ -138,21 +156,29 @@ export function parseCli(args, { config = {} } = {}) {
     if (args.length !== 1) throw new Error('Usage: veo version');
     return { version: true };
   }
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: cliOptions(config) });
+  const preliminary = parseArgs({ args, allowPositionals: true, strict: true, allowNegative: true, options: cliOptions() });
+  config = applyProfile(config, preliminary.values.profile);
+  const { values, positionals, tokens } = parseArgs({ args, tokens: true, allowNegative: true, allowPositionals: true, strict: true, options: cliOptions(config) });
   if (values.help || values.version) return values;
-  const defaults = optionDefaults(config);
   // A stored default conflicting with a flag typed right now is a user error;
   // a stored default merely ignored by another flag is not.
   const typed = {
-    quality: values.quality !== defaults.quality,
-    closest: values['closest-quality'] !== defaults['closest-quality'],
-    audio: values.audio !== defaults.audio,
+    quality: tokens.some(token => token.name === 'quality'),
+    closest: tokens.some(token => token.name === 'closest-quality'),
+    audio: tokens.some(token => ['audio', 'no-audio'].includes(token.name)),
   };
   // An explicit numeric --quality states video intent, so it overrides an
   // audio-only default instead of turning into a confusing conflict error.
   if (typed.quality && values.quality !== 'best' && values.audio && !typed.audio) values.audio = false;
-  if (!positionals.length) throw new Error('Provide at least one video URL. Run veo --help for usage.');
-  if (!QUALITIES.includes(values.quality)) throw new Error(`Invalid quality. Choose: ${QUALITIES.join(', ')}.`);
+  if (!positionals.length && !values['batch-file'] && !values['retry-failed']) throw new Error('Provide at least one video URL. Run veo --help for usage.');
+  if (!QUALITIES.includes(values.quality) && !/^[1-9]\d{1,4}p$/.test(values.quality)) throw new Error(`Invalid quality. Choose: ${QUALITIES.join(', ')} or a numeric resolution.`);
+  if (values['playlist-items']) {
+    if (values.playlist === false && tokens.some(token => token.name === 'playlist')) {
+      if (tokens.some(token => token.name === 'playlist-items')) throw new Error('--playlist-items cannot be combined with --no-playlist.');
+      values['playlist-items'] = undefined;
+    } else { validateItems(values['playlist-items']); values.playlist = true; }
+  }
+  if (values['retry-failed'] && (positionals.length || values['batch-file'])) throw new Error('--retry-failed cannot be combined with URLs or --batch-file.');
   if (!values.output.trim()) throw new Error('The output directory cannot be empty.');
   if (values.rename !== undefined && !cleanText(values.rename)) throw new Error('The custom filename cannot be empty.');
   if (positionals.length > 1 && values.rename !== undefined) throw new Error('--rename only applies to a single URL.');
@@ -182,34 +208,13 @@ export function parseCli(args, { config = {} } = {}) {
   if (options.section) options.section = options.section.trim();
   if (options.sponsorblockRemove) options.sponsorblockRemove = options.sponsorblockRemove.trim();
   if (options.concurrentFragments !== undefined) options.concurrentFragments = Number(options.concurrentFragments);
-  if (options.subLangs) options.subs = true;
-  return options;
-}
-
-async function jsonMain(options, { reporter, signal }) {
-  const { download } = await import('./downloader.js');
-  const results = [];
-  let failed = false;
-  for (const url of options.urls) {
-    try {
-      const result = await download({ ...options, url }, { signal, reporter });
-      results.push({ url, status: 'saved', title: result.title, files: result.files });
-      if (options.open && result.files.length) {
-        try { await openFile(result.files[0]); }
-        catch (error) { process.stderr.write(`veo: File saved, but could not launch the default app: ${readableError(error)}\n`); }
-      }
-    } catch (error) {
-      if (signal.aborted) {
-        results.push({ url, status: 'cancelled' });
-        failed = true;
-        break;
-      }
-      results.push({ url, status: 'failed', error: readableError(error) });
-      failed = true;
-    }
+  const disableSubs = values.subs === false && tokens.some(token => token.name === 'subs');
+  if (options.subLangs && !disableSubs) options.subs = true;
+  if (disableSubs) {
+    options.subLangs = undefined;
+    options.embedSubs = false;
   }
-  for (const result of results) process.stdout.write(`${JSON.stringify(result)}\n`);
-  return failed ? 1 : 0;
+  return options;
 }
 
 export async function main(args = process.argv.slice(2), { config } = {}) {
@@ -220,6 +225,10 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
       return 0;
     }
     return updateMain(args, { registry: defaultRegistry() });
+  }
+  if (args[0] === 'config') {
+    try { return await configMain(args.slice(1)); }
+    catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
   }
   if (args[0] === 'doctor') {
     try {
@@ -247,12 +256,33 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
   try {
     const loaded = config ?? await loadConfig();
     for (const warning of loaded.warnings || []) process.stderr.write(`veo: ${warning}\n`);
-    const options = parseCli(args, { config: loaded.config });
+    if (!args.length && process.stdin.isTTY && process.stderr.isTTY) {
+      const { interactiveArgs } = await import('./interactive.js');
+      args = await interactiveArgs(loaded.config || {}, { signal: controller.signal });
+      if (!args) return 0;
+    }
+    let options = parseCli(args, { config: loaded.config });
     if (options.help) { process.stdout.write(HELP); return 0; }
     if (options.version) {
       const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
       process.stdout.write(`${pkg.version}\n`);
       return 0;
+    }
+    let retryItems;
+    if (options.retryFailed) {
+      retryItems = await retryOptions(options.retryFailed);
+      // Revalidate stored options and apply only flags explicitly supplied now.
+      const retryArgs = args.filter((arg, index) => arg !== '--retry-failed' && args[index - 1] !== '--retry-failed' && !arg.startsWith('--retry-failed='));
+      retryItems = retryItems.map(item => parseCli([item.url, ...retryArgs], { config: { ...item, profiles: loaded.config?.profiles } }));
+      options = { ...retryItems[0], urls: retryItems.map(item => item.url) };
+    }
+    if (options.batchFile) {
+      const lines = (await readFile(options.batchFile, 'utf8')).replace(/^\uFEFF/, '').split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+      options.urls.push(...lines.map(validateUrl));
+      options.url = options.urls[0];
+      if (!options.urls.length) throw new Error('The URL list is empty.');
+      if (options.rename && options.urls.length > 1) throw new Error('--rename only applies to a single URL.');
+      if (options.listFormats && options.urls.length > 1) throw new Error('--list-formats accepts exactly one URL.');
     }
     reporter.start(options.rename);
     const cookieWarning = cookieFileWarning(options.cookies);
@@ -265,55 +295,29 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     }
     if (options.dryRun) {
       const { planDownload } = await import('./downloader.js');
-      for (const url of options.urls) {
-        const plan = await planDownload({ ...options, url }, { signal: controller.signal, reporter });
+      for (const request of retryItems || options.urls.map(url => ({ ...options, url }))) {
+        const { url } = request;
+        const plan = await planDownload(request, { signal: controller.signal, reporter });
         if (options.json) process.stdout.write(`${JSON.stringify({ url, status: 'planned', ...plan })}\n`);
         else {
           process.stdout.write(`URL: ${url}\n`);
+          process.stdout.write(`${describeEstimate(plan)}\n`);
           if (plan.quality) process.stdout.write(`${plan.quality}\n`);
           for (const entry of plan.entries) process.stdout.write(`Would save: ${cleanText(entry.path)}\n`);
         }
       }
       return 0;
     }
-    if (options.json) return await jsonMain(options, { reporter, signal: controller.signal });
-
     const { download } = await import('./downloader.js');
-    let failed = 0;
-    const primaryFiles = [];
-    for (const url of options.urls) {
-      try {
-        const result = await download({ ...options, url }, { signal: controller.signal, reporter });
-        reporter.complete();
-        for (const file of result.files) process.stdout.write(`Saved: ${cleanText(file)}\n`);
-        if (result.files.length) primaryFiles.push(result.files[0]);
-      } catch (error) {
-        if (controller.signal.aborted) throw error;
-        failed++;
-        const prefix = options.urls.length > 1 ? `${cleanText(url)}: ` : '';
-        process.stderr.write(`veo: ${prefix}${readableError(error)}\n`);
-      }
-    }
-    if (failed) {
-      reporter.fail();
-      return 1;
-    }
-    if (options.open) {
-      for (const file of primaryFiles) {
-        try { await openFile(file); }
-        catch (error) {
-          process.stderr.write(`veo: File saved, but could not launch the default app: ${readableError(error)}\n`);
-          break;
-        }
-      }
-    }
+    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems });
+    if (result !== 0) return result;
     const notice = await maybeUpdateNotice({ currentVersion: await packageVersion() });
     if (notice) process.stderr.write(`${notice}\n`);
     return 0;
   } catch (error) {
     reporter.fail(controller.signal.aborted);
     process.stderr.write(`veo: ${readableError(error)}\n`);
-    return controller.signal.aborted ? 130 : 1;
+    return controller.signal.aborted || error.name === 'AbortError' ? 130 : 1;
   } finally {
     process.removeListener('SIGINT', cancel);
     process.removeListener('SIGTERM', cancel);

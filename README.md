@@ -34,6 +34,12 @@ veo "https://example.com/video.mp4"
 
 If something does not work, run `veo doctor` first: it inspects the whole local setup and prints one line per check.
 
+Run `veo` without arguments in an interactive terminal for a guided download: choose a
+profile, enter a link, select video or audio, choose available resolution and output
+directory, and start. Playlist mode also lists entries for selection. The wizard enables
+resume and offers skipping previously downloaded files. With redirected input, use the
+regular command arguments; veo never starts a prompt in a script.
+
 ## Usage
 
 ```text
@@ -63,6 +69,12 @@ Options:
   --list-formats            Show available formats and exit
   --dry-run                 Show what would be downloaded and exit
   --json                    One JSON object per URL instead of prose
+  --profile <name>          Use a named profile from the config file
+  --batch-file <file>       Read one URL per line (blank lines and # comments ignored)
+  --retry-failed <file>     Retry failed/unfinished downloads from a saved job
+  --playlist-items <list>   Select entries, e.g. 1,3-5 (implies --playlist)
+  --skip-existing          Skip matching downloads that are still on disk
+  --no-<boolean-option>    Disable a default, e.g. --no-open or --no-audio
   -v, --version             Show installed version (also: veo version)
   -h, --help                Show help
 ```
@@ -73,8 +85,8 @@ veo "https://x.com/USER/status/STATUS_ID" -q best
 veo "https://example.com/video.mp4" --audio
 veo "https://example.com/video.mp4" --audio --format flac
 veo "https://example.com/video.mp4" --format webm -o ./videos
-veo "https://example.com/video.mp4" -r "Mein Video" --format mp4 --open
-veo "https://example.com/video.mp4" --audio -r "Meine Musik"
+veo "https://example.com/video.mp4" -r "My Video" --format mp4 --open
+veo "https://example.com/video.mp4" --audio -r "My Music"
 veo <url1> <url2> <url3> --embed-metadata --subs
 veo "https://youtube.com/playlist?list=LIST_ID" --playlist -q 720p
 veo "https://example.com/video.mp4" --resume
@@ -89,6 +101,30 @@ npx @mailo037/veo "https://example.com/video.mp4" --output ./downloads
 - Playlists, channels and other collections are refused by default with a hint. Add
   `--playlist` to download every entry. Each entry keeps its own title; `--rename` applies
   a name prefix per entry (`My Name - 001`).
+- Use `--playlist-items 1,3-5` to select entries by their original, one-based index.
+  Playlists are processed one entry at a time: a failed entry does not discard successful
+  files or stop the remaining entries. Before downloading, veo displays the selected count
+  and a size estimate when the source supplies sizes. Unknown sizes are labeled explicitly;
+  metadata estimates do not predict conversion size.
+- `--batch-file links.txt` accepts a UTF-8 URL list, optionally alongside URLs on the command
+  line. A final summary counts saved, skipped and failed videos. Successful files are opened
+  with `--open` even if another URL or playlist entry fails.
+- Failed or cancelled jobs print a ready-to-use `veo --retry-failed "<job.json>"` command.
+  Jobs are stored under the per-user veo cache's `jobs` directory. Retries retain resolved
+  output directories and settings, even from a different working directory, and explicit
+  flags can override them. Completed playlist jobs retry only failed indices; interrupted
+  playlists revisit their selection and skip completed entries through resume history.
+  Playlist indices refer to the playlist's current order, so changes to that order can
+  change what an index selects. Cookie paths and browser-session settings are not saved in
+  retry jobs; pass those flags again if needed. Job files contain URLs, settings and local
+  file paths and can be deleted when no longer needed.
+
+```bash
+veo --batch-file links.txt --profile archive
+veo "https://example.com/playlist" --playlist-items 1,3-5 --resume
+veo "https://example.com/playlist" --playlist --skip-existing
+veo --retry-failed "C:\path\to\job.json"
+```
 
 ### Quality
 
@@ -99,7 +135,10 @@ npx @mailo037/veo "https://example.com/video.mp4" --output ./downloads
 - `--closest-quality` restores the former "nearest available resolution" rule, which may
   pick a resolution *above* the request. It needs a numeric `--quality`.
 - Sources that report no resolution metadata fall back to the best available stream.
-  Collections select per entry with the backend's own resolution preference.
+  Collections resolve and enforce the quality limit separately for each entry.
+- Other positive numeric resolutions, such as `-q 540p`, are also accepted. The interactive
+  wizard offers the resolutions reported by the source; without resolution metadata it
+  offers `best` rather than inventing available streams.
 - `--quality` does not apply to audio.
 - MP4-compatible codecs are preferred at the selected resolution; merged video prefers MP4
   with MKV fallback. A single-file source may retain its original container. Use
@@ -119,10 +158,22 @@ npx @mailo037/veo "https://example.com/video.mp4" --output ./downloads
   is linked (or, on filesystems without hard links, copied) to a collision-safe final name.
   Staging is removed on ordinary failure or Ctrl+C; force-killing the process may leave
   `.veo-*` directories to remove manually, and `veo doctor` reports leftovers.
-- `--resume` keeps partial data in `.veo-part-<video id>` instead, and continues it on a
-  later run. The folder survives a failure or Ctrl+C and is removed after a successful save.
-  A staged file that was already complete is finished without re-downloading. Partial
-  downloads are never resumed without `--resume`.
+- `--resume` keeps partial data in `.veo-part-<source-and-settings-hash>` instead, and
+  continues it on a later run. The hash separates platforms, videos, quality, media type,
+  format, sections and subtitle/metadata options. A manifest records backend-confirmed
+  completion and saved files, so an unprocessed file is not mistaken for a finished video.
+  Each playlist entry has its own state. Completed entries survive later failures and are
+  skipped when resuming the same selection. Partial downloads are never resumed without
+  `--resume`. Old `.veo-part-<video id>` folders are left untouched because their settings
+  cannot be verified.
+- A lock prevents two resume processes from using the same partial folder. Normal failures
+  and Ctrl+C release it. After a force kill, remove the named `.lock` file only after making
+  sure no veo process still uses that folder.
+- Successful downloads record their source, output settings and saved paths in
+  `.veo-history` inside the output directory. `--skip-existing` uses these records and checks
+  that the files still exist. A different quality/format or deleted output is downloaded
+  again. Files downloaded before this history existed are not recognized automatically.
+  Deleting history removes duplicate detection, not downloaded media.
 
 ### Metadata and subtitles
 
@@ -159,11 +210,17 @@ download fails because a login is required, the error message points at these fl
   `{"url":…,"status":"saved","title":…,"files":[…]}` or
   `{"url":…,"status":"failed","error":…}`. Progress and status still go to stderr. Without
   `--json`, every saved file is printed as `Saved: <path>` on stdout.
+  Duplicate detection can return `status: "skipped"`; cancellation returns `"cancelled"`.
+  Playlist results also include `saved`, `skipped` and `failures` (with original indices).
+  A failed or cancelled playlist can still report files saved before the failure.
 
 ### Config file
 
 Defaults can be stored in a config file, so a long list of flags is not needed for every
 call. `veo doctor` prints the exact path; `VEO_CONFIG` overrides it.
+The file accepts JSON with `//` line comments and `/* ... */` block comments. Strings
+(including URLs and Windows paths) keep their normal JSON escaping rules. Trailing commas
+are not allowed.
 
 - Windows: `%APPDATA%\veo\config.json`
 - macOS: `~/Library/Application Support/veo/config.json`
@@ -186,6 +243,33 @@ Supported keys: `output`, `quality`, `format`, `rename`, `audio`, `open`, `resum
 unknown key produces a warning; invalid JSON or a wrong value type is an error, because
 silently ignoring a typo would be worse.
 
+Additional defaults are `skipExisting` and `playlistItems`. Boolean defaults can be disabled
+with `--no-open`, `--no-audio`, `--no-resume`, `--no-embed-metadata`, etc. `--no-subs` also
+disables stored subtitle languages and subtitle embedding for that invocation.
+
+### Named profiles
+
+```json
+{
+  "output": "D:\\Videos",
+  "profiles": {
+    "music": { "audio": true, "format": "mp3", "output": "D:\\Music" },
+    "archive": { "quality": "1080p", "embedMetadata": true, "subLangs": "de,en" }
+  }
+}
+```
+
+`veo <url> --profile music` merges global defaults, then the selected profile, then explicit
+CLI flags. `veo config profiles` lists profile names; `veo config path` prints the file path.
+`veo config edit` fills new or empty files with a commented template explaining common
+options and example profiles. Existing files receive a commented reference guide once;
+their settings remain intact. It opens the file in `VISUAL` or `EDITOR`
+(an executable path, without shell arguments), falling back to Notepad on Windows or `vi`
+elsewhere. Existing configuration is preserved. The wizard also offers configured profiles.
+Generated templates and app messages are in English. Previously generated German template
+comments are translated the next time you run `veo config edit`; existing profile names,
+paths and custom comments are preserved.
+
 ### Terminal output
 
 - During a download, the terminal/tab title shows `veo | 50% | My Video` (original title or
@@ -197,6 +281,10 @@ silently ignoring a typo would be worse.
 - Progress shows percentage, speed, downloaded/total size and ETA on stderr; unknown values
   appear as `?`. Separate audio/video streams each have their own progress. Non-interactive
   output is throttled.
+- Progress labels include the current item (`[3/12]`), source title, video/audio/media stream,
+  postprocessing (merging, conversion, subtitles or metadata) and saving. Stream percentages
+  describe that stream, not the entire multi-step job. Sources without codec metadata use
+  the neutral `Media` label.
 - `--open` launches the completed file in your default app, including renamed files and
   audio. With several URLs, the primary file of each URL is opened. Uses `explorer.exe` on
   Windows, `open` on macOS, and `xdg-open` on Linux (requires a graphical desktop,
@@ -213,6 +301,10 @@ silently ignoring a typo would be worse.
 
 ```bash
 veo version           # installed version (also: veo --version or veo -v)
+veo                   # interactive download wizard (terminal only)
+veo config edit       # create/open config, including example profiles
+veo config profiles   # list available profiles
+veo config path       # show the config file location
 veo doctor            # diagnose the local setup; exit 1 if a check fails
 veo doctor --offline  # skip the network checks
 veo update            # install the latest veo with npm

@@ -64,11 +64,11 @@ cp.spawn = function(command, args, options) {
 require('node:module').syncBuiltinESMExports();
 `);
   const url = `http://127.0.0.1:${server.address().port}/video.mp4`;
-  console.log('Testing CLI: veo <local-video> -r "Mein Video" --open');
-  assert.equal(await run(process.execPath, ['--require', hook, cli, url, '-r', 'Mein Video', '--open'], { ...process.env, VEO_OPEN_TEST_LOG: log }), 0);
+  console.log('Testing CLI: veo <local-video> -r "My Video" --open');
+  assert.equal(await run(process.execPath, ['--require', hook, cli, url, '-r', 'My Video', '--open'], { ...process.env, VEO_OPEN_TEST_LOG: log }), 0);
   const launch = JSON.parse(await readFile(log, 'utf8'));
   assert.equal(launch.command, process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open');
-  assert.deepEqual(launch.args, [path.join(root, 'Mein Video.mp4')]);
+  assert.deepEqual(launch.args, [path.join(root, 'My Video.mp4')]);
   assert.equal(launch.options.shell, false);
   assert.equal(launch.options.detached, true);
   assert.equal(launch.size, media.length);
