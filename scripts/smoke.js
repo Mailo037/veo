@@ -112,6 +112,27 @@ try {
   assert.equal(skipped.code, 0, skipped.stderr);
   assert.equal(JSON.parse(skipped.stdout.trim()).status, 'skipped');
 
+  // `veo history` reports the attempts of the real runs above, newest first.
+  const history = await capture(process.execPath, [cli, 'history', '--json']);
+  assert.equal(history.code, 0, history.stderr);
+  const recorded = JSON.parse(history.stdout);
+  assert(recorded.count > 0, 'a run must leave history');
+  assert.equal(recorded.entries[0].status, 'skipped', 'the newest attempt is listed first');
+  assert(recorded.entries.some(entry => entry.status === 'failed' && /deleted\.mp4/.test(entry.url)), 'a failed attempt must be recorded');
+  assert(recorded.entries.some(entry => entry.status === 'saved' && entry.files.length === 1), 'a saved attempt must record its files');
+  const historyText = await capture(process.execPath, [cli, 'history']);
+  assert.equal(historyText.code, 0, historyText.stderr);
+  assert.match(historyText.stdout, /^veo history \(last 5, newest first\)/);
+  assert.match(historyText.stdout, /Status: skipped/);
+
+  // Finished runs must clean up their record, so nothing is left to stop.
+  const leftover = await capture(process.execPath, [cli, 'runs']);
+  assert.equal(leftover.code, 0, leftover.stderr);
+  assert.match(leftover.stdout, /No veo runs are active/);
+  const nothingToStop = await capture(process.execPath, [cli, 'stop']);
+  assert.equal(nothingToStop.code, 0, nothingToStop.stderr);
+  assert.match(nothingToStop.stdout, /No veo runs were active/);
+
   // Generic HTML playlist exercises actual --playlist-items extraction and per-entry saves.
   const playlist = await capture(process.execPath, [cli, url.replace('original-title.mp4', 'playlist.html'), '--playlist-items', '2', '-r', 'Selected', '-o', './playlist', '--resume', '--json']);
   assert.equal(playlist.code, 0, playlist.stderr);
@@ -141,7 +162,7 @@ try {
   assert((await stat(path.join(root, 'audio', 'original-title.mp3'))).size > 0);
   assert((await stat(path.join(root, 'converted', 'original-title.webm'))).size > 0);
   assert(!files.some(name => name.startsWith('.veo-') && name !== '.veo-history'));
-  console.log('PASS: real video, quality cap, duplicate names, audio, conversion, dry run, formats, JSON, metadata, resume, batch failure, profiles, URL lists, retry from another directory, skip-existing and playlist selection.');
+  console.log('PASS: real video, quality cap, duplicate names, audio, conversion, dry run, formats, JSON, metadata, resume, batch failure, profiles, URL lists, retry from another directory, skip-existing, playlist selection, history and run listings.');
 } finally {
   if (server) await new Promise(resolve => server.close(resolve));
   await rm(root, { recursive: true, force: true });

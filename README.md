@@ -331,6 +331,9 @@ veo doctor            # diagnose the local setup; exit 1 if a check fails
 veo doctor fix        # restore missing or damaged managed tools
 veo doctor --offline  # skip the network checks
 veo stats             # persistent download totals; --json for scripting
+veo history           # the last 5 downloads; --json for scripting
+veo runs              # active runs with their id; veo runs <id> for details
+veo stop [id]         # stop one run, or every active run
 veo flush             # stop runs, clear temporary downloads and retry jobs
 veo flush --stats     # the same, and reset the statistics
 veo update            # install the latest veo with npm
@@ -352,11 +355,13 @@ command on any failure. The registry can be overridden with `VEO_REGISTRY` (or n
 Run `veo flush` to stop active veo runs started with this version, then remove
 temporary local downloads, including the 15-minute retained files and unfinished
 resume data, and cached retry job JSON files. Those jobs can no longer be retried.
-Saved media, output history, config/profiles and backend binaries are kept.
+Saved media, output history, config/profiles, the `veo history` list and backend
+binaries are kept.
 Cleanup waits for cancellation; if a run cannot stop, it fails without deleting
 download or job files. Locked folders from older or interrupted processes are
 skipped and reported. Only veo's own per-user cache is cleaned. Statistics are
 preserved unless `--stats` is given: `veo flush --stats` resets them too.
+To end runs without removing their downloads and jobs, use `veo stop [id]` instead.
 
 ### `veo stats`
 
@@ -366,6 +371,53 @@ times are added together. Playlist entries count individually; retries are new
 attempts. Active requests are recorded when they finish. Tracking starts with this
 version; previous downloads are not imported. `veo stats --json` returns the totals
 as JSON. Statistics contain counters and timestamps, not URLs or filenames.
+
+### `veo history`
+
+Shows the **last 5 download attempts**, newest first, with title, status, media type,
+date, duration, URL and the saved files. Saved, skipped, failed and cancelled items are
+recorded, including the reason a failure was reported; playlist entries and retried
+attempts count individually. Active downloads appear once they finish. Long file lists
+are summarized in the text view.
+
+`veo history --json` prints `{"count":N,"entries":[…]}` for scripting. Each entry has
+`at`, `url`, `title`, `status`, `media` (`video`/`audio`), `quality`, `format`, the
+complete `files` list, `error` and `elapsedMs`. Titles and paths are stored without
+terminal control characters.
+
+History is one small JSON file per attempt in the per-user veo cache's `history`
+directory, so parallel runs cannot overwrite each other and each record stays small. The
+directory keeps one file per attempt and contains URLs, titles and local file paths;
+delete it to remove those records. `veo flush` keeps the list (only `veo flush --stats`
+resets statistics, not history).
+
+### `veo runs` and `veo stop`
+
+Every run registers itself while it works, under a **6-character id**, and removes that
+record when it ends:
+
+```bash
+veo runs            # active runs: id, PID, state, start time, progress, output directory
+veo runs k3f9qa     # one run in detail: URLs, settings, job file, per-item state
+veo stop k3f9qa     # ask that run to stop and wait until it exits
+veo stop            # stop every active run
+```
+
+`veo runs` lists the runs of this user, including those started in another terminal, and a
+run disappears from the list as soon as it finishes. Progress such as
+`1/3 done, 1 running` is read from the run's job file, which is created before the first
+download starts, so a run that is still preparing the backend shows `starting`. `veo stop
+<id>` writes a stop request that the run itself polls, so it needs no signals or PIDs and
+works the same on every platform. A stopped run exits like Ctrl+C (`130`) and keeps its
+partial data and retry job, so the printed `veo --retry-failed` command still works —
+unlike `veo flush`, which also removes that data. If a run does not stop within 15 seconds,
+`veo stop` reports it and exits with `1`.
+
+A run that crashed without cleaning up leaves its record behind: `veo runs` marks it
+`stale` and `veo stop` removes it, with or without its id. Records contain the id, process
+id, start time, URLs, output directory and job path — never cookie files, browser sessions
+or other credentials. Unknown or damaged record files are ignored instead of breaking veo,
+because a single stray file in the cache must never stop later runs.
 
 ### `veo doctor`
 
@@ -446,8 +498,10 @@ and runs real yt-dlp downloads. It checks default output, the quality cap, dupli
 audio extraction, conversion, dry-run, format listing, JSON output, metadata embedding,
 resume, batch behaviour, playlist selection and nonzero failures, and verifies that a
 finished download whose destination was unavailable is retried from the local cache
-without contacting the source again. It needs network access once for yt-dlp
-acquisition; it downloads no third-party video. Unit tests require no network.
+without contacting the source again. It also confirms that real runs leave `veo history`
+entries, that finished runs clean up their record, and that `veo runs`/`veo stop` report
+nothing left behind. It needs network access once for yt-dlp acquisition; it downloads no
+third-party video. Unit tests require no network.
 
 The published tarball only includes `bin/`, `src/`, package metadata, README and LICENSE.
 The lockfile is kept for reproducible development. There is no build step. npm makes the
@@ -461,7 +515,8 @@ Modules separate argument parsing (`src/cli.js`), configuration (`src/config.js`
 `src/config-errors.js`, `src/config-template.js`), backend setup (`src/backend.js`),
 backend updates (`src/backend-update.js`), download orchestration (`src/downloader.js`,
 `src/download-cache.js`), retry jobs (`src/jobs.js`), playlists (`src/playlist.js`),
-statistics and cleanup (`src/stats.js`, `src/flush.js`), diagnostics (`src/doctor.js`),
+statistics, download history, the run registry and cleanup (`src/stats.js`,
+`src/history.js`, `src/runs.js`, `src/flush.js`), diagnostics (`src/doctor.js`),
 progress (`src/progress.js`), and helpers (`src/utils.js`, `src/paths.js`,
 `src/state.js`, `src/version.js`) so new options and providers can be added without
 replacing the CLI.

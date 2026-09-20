@@ -38,6 +38,14 @@ export function cleanText(value) {
   return String(value).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, ' ').trim();
 }
 
+/** Locale-independent local timestamp for CLI output, e.g. "2026-02-03 14:22". */
+export function localStamp(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'unknown';
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 /**
  * Validate a Netscape-format cookie file before any network work starts, so a
  * typo fails immediately instead of after backend acquisition. The file is only

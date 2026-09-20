@@ -19,8 +19,16 @@ export async function retryOptions(file) {
   });
 }
 
-export async function runJob(options, { download, reporter, signal, openFile, stdout = process.stdout, stderr = process.stderr, jobFile, items, recordStats } = {}) {
-  const file = jobFile || path.join(cacheBase(), 'jobs', `${Date.now()}-${randomUUID()}.json`);
+/**
+ * Location of one run's job file. It is created before the first download starts
+ * so `veo runs <id>` can report per-item progress from it.
+ */
+export function jobFilePath(root = cacheBase()) {
+  return path.join(root, 'jobs', `${Date.now()}-${randomUUID()}.json`);
+}
+
+export async function runJob(options, { download, reporter, signal, openFile, stdout = process.stdout, stderr = process.stderr, jobFile, items, recordStats, recordHistory } = {}) {
+  const file = jobFile || jobFilePath();
   const requests = items || options.urls.map(url => ({ ...options, url }));
   const job = { version: 1, options: publicOptions({ ...options, output: path.resolve(options.output) }),
     items: requests.map(item => ({ url: item.url, status: 'pending', entries: [] })) };
@@ -35,6 +43,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
     const before = { saved, skipped, failed };
     const published = new Set();
     let opened = false;
+    let title;
     const publish = async files => {
       if (!options.json) for (const target of files) {
         if (!published.has(target)) stdout.write(`Saved: ${cleanText(target)}\n`);
@@ -59,6 +68,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
         await publish(entry.files || []);
       } });
       Object.assign(item, { status: result.status || 'saved', files: result.files, finished: true });
+      title = result.title;
       if (!item.entries.length) {
         saved += result.saved ?? (item.status === 'saved' ? 1 : 0);
         skipped += result.skipped ?? 0;
@@ -81,6 +91,15 @@ export async function runJob(options, { download, reporter, signal, openFile, st
           skipped: skipped - before.skipped, cancelled: item.status === 'cancelled' ? 1 : 0,
           elapsedMs: Math.round(performance.now() - started) });
       } catch (error) { stderr.write(`veo: Could not save statistics: ${readableError(error)}\n`); }
+    }
+    // History is written per finished item, so `veo history` never reports an
+    // attempt that is still running.
+    if (recordHistory) {
+      try {
+        await recordHistory({ url: request.url, title, status: item.status, audio: Boolean(request.audio),
+          quality: request.quality, format: request.format, files: item.files || [], error: item.error,
+          elapsedMs: Math.round(performance.now() - started) });
+      } catch (error) { stderr.write(`veo: Could not save download history: ${readableError(error)}\n`); }
     }
     await writeJson(file, job);
   }

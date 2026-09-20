@@ -2,6 +2,32 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.5.0
+
+### Added
+
+- **`veo runs` and `veo stop`**: every run registers itself with a **6-character id** while
+  it works, so another terminal can watch and end it. `veo runs` lists active runs with PID,
+  state, start time, progress and output directory, `veo runs <id>` shows one run in detail
+  (URLs, media settings, job file and per-item state), `veo stop <id>` stops that run and
+  `veo stop` stops every run. A stop request is polled by the run itself, so no signals or
+  PIDs are needed; the stopped run exits like Ctrl+C and keeps its partial data and retry
+  job. Records of crashed runs are marked `stale` and removed by `veo stop`. Run records
+  never contain credentials or cookie settings, and an unknown or damaged record file is
+  ignored instead of breaking later runs.
+- **`veo history`**: shows the last 5 download attempts, newest first, with title, status,
+  media type, date, duration, URL and the saved files. Saved, skipped, failed and cancelled
+  items are recorded, including the reported failure reason; playlist entries and retries
+  count individually. `veo history --json` prints `{"count":N,"entries":[…]}` with the
+  complete file list for scripting. Records live as one small file per attempt in the
+  per-user veo cache's `history` directory and are kept by `veo flush`.
+
+### Changed
+
+- The run registry moved out of `veo flush` into `src/runs.js`; `veo flush` and `veo stop`
+  now stop the same registered runs, and `veo flush` keeps working with run records written
+  by older versions.
+
 ## 1.4.0
 
 ### Added

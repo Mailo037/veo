@@ -1,11 +1,12 @@
 import { parseArgs } from 'node:util';
+import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { createReporter } from './progress.js';
 import { openFile } from './open-file.js';
 import { maybeUpdateNotice, updateMain, UPDATE_HELP, defaultRegistry, packageVersion } from './updater.js';
 import { applyProfile, configMain, loadConfig } from './config.js';
 import { validateItems, describeEstimate } from './playlist.js';
-import { retryOptions, runJob } from './jobs.js';
+import { retryOptions, runJob, jobFilePath } from './jobs.js';
 import { QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, validateUrl, readableError, cleanText, validateCookieFile, validateBrowserSpec, cookieFileWarning } from './utils.js';
 
 export const HELP = `veo - simple video downloader
@@ -57,6 +58,9 @@ Commands:
   veo doctor               Diagnose the local setup
   veo flush                Stop veo runs and clear temporary downloads and jobs
   veo stats                Show persistent download statistics
+  veo history              Show the last 5 downloads (--json for scripting)
+  veo runs [id]            List active runs, or show one run in detail
+  veo stop [id]            Stop one run, or every active run
   veo version              Show the installed version
   veo config edit|path|profiles  Manage defaults and named profiles
 
@@ -224,8 +228,20 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     try { return await (await import('./stats.js')).statsMain(args.slice(1)); }
     catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
   }
+  if (args[0] === 'history') {
+    try { return await (await import('./history.js')).historyMain(args.slice(1)); }
+    catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
   if (args[0] === 'flush') {
     try { return await (await import('./flush.js')).flushMain(args.slice(1)); }
+    catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
+  if (args[0] === 'runs') {
+    try { return await (await import('./runs.js')).runsMain(args.slice(1)); }
+    catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
+  if (args[0] === 'stop') {
+    try { return await (await import('./runs.js')).stopMain(args.slice(1)); }
     catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
   }
   const { cleanupDownloadCache } = await import('./download-cache.js');
@@ -263,12 +279,12 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
   const reporter = createReporter();
   const controller = new AbortController();
   const cancel = () => controller.abort();
-  let unregister;
+  let run;
   process.once('SIGINT', cancel);
   process.once('SIGTERM', cancel);
   try {
     if (!args.includes('--help') && !args.includes('-h') && !args.includes('--version')) {
-      unregister = await (await import('./flush.js')).registerRun(cancel);
+      run = await (await import('./runs.js')).registerRun(cancel);
     }
     const loaded = config ?? await loadConfig();
     for (const warning of loaded.warnings || []) process.stderr.write(`veo: ${warning}\n`);
@@ -300,6 +316,11 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
       if (options.rename && options.urls.length > 1 && !options.rename.includes('*')) throw new Error('--rename only applies to a single URL unless the name contains * for the original title.');
       if (options.listFormats && options.urls.length > 1) throw new Error('--list-formats accepts exactly one URL.');
     }
+    // The job file is created before the first download, so another terminal can
+    // follow this run's per-item progress with `veo runs <id>`.
+    const jobFile = options.listFormats || options.dryRun ? null : jobFilePath();
+    await run?.describe({ urls: options.urls, output: options.output ? path.resolve(options.output) : null,
+      audio: options.audio, quality: options.quality, format: options.format, playlist: options.playlist, job: jobFile });
     reporter.start(options.rename);
     const cookieWarning = cookieFileWarning(options.cookies);
     if (cookieWarning) process.stderr.write(`veo: ${cookieWarning}\n`);
@@ -326,7 +347,8 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     }
     const { download } = await import('./downloader.js');
     const { createStatsRecorder } = await import('./stats.js');
-    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, recordStats: createStatsRecorder() });
+    const { createHistoryRecorder } = await import('./history.js');
+    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, jobFile: jobFile || undefined, recordStats: createStatsRecorder(), recordHistory: createHistoryRecorder() });
     if (result !== 0) return result;
     const notice = await maybeUpdateNotice({ currentVersion: await packageVersion() });
     if (notice) process.stderr.write(`${notice}\n`);
@@ -336,7 +358,7 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     process.stderr.write(`veo: ${readableError(error)}\n`);
     return controller.signal.aborted || error.name === 'AbortError' ? 130 : 1;
   } finally {
-    await unregister?.();
+    await run?.unregister();
     process.removeListener('SIGINT', cancel);
     process.removeListener('SIGTERM', cancel);
   }
