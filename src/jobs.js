@@ -19,7 +19,7 @@ export async function retryOptions(file) {
   });
 }
 
-export async function runJob(options, { download, reporter, signal, openFile, stdout = process.stdout, stderr = process.stderr, jobFile, items } = {}) {
+export async function runJob(options, { download, reporter, signal, openFile, stdout = process.stdout, stderr = process.stderr, jobFile, items, recordStats } = {}) {
   const file = jobFile || path.join(cacheBase(), 'jobs', `${Date.now()}-${randomUUID()}.json`);
   const requests = items || options.urls.map(url => ({ ...options, url }));
   const job = { version: 1, options: publicOptions({ ...options, output: path.resolve(options.output) }),
@@ -31,6 +31,8 @@ export async function runJob(options, { download, reporter, signal, openFile, st
   for (const [index, request] of requests.entries()) {
     if (signal?.aborted) break;
     const item = job.items[index];
+    const started = performance.now();
+    const before = { saved, skipped, failed };
     const published = new Set();
     let opened = false;
     const publish = async files => {
@@ -71,6 +73,14 @@ export async function runJob(options, { download, reporter, signal, openFile, st
       item.files = item.entries.flatMap(entry => entry.files || []);
       if (options.json) stdout.write(`${JSON.stringify({ url: request.url, status: item.status, error: item.error, files: item.files })}\n`);
       else stderr.write(`veo: ${cleanText(request.url)}: ${item.error}\n`);
+    }
+    if (recordStats) {
+      try {
+        await recordStats({ videos: request.audio ? 0 : saved - before.saved,
+          audio: request.audio ? saved - before.saved : 0, failed: failed - before.failed,
+          skipped: skipped - before.skipped, cancelled: item.status === 'cancelled' ? 1 : 0,
+          elapsedMs: Math.round(performance.now() - started) });
+      } catch (error) { stderr.write(`veo: Could not save statistics: ${readableError(error)}\n`); }
     }
     await writeJson(file, job);
   }

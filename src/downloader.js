@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { lstat, mkdir, mkdtemp, open, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveBackend } from './backend.js';
 import { availableHeights, cappedHeight, closestHeight, saveUnique, sanitizeTitle } from './utils.js';
 import { digest, readJson, writeJson } from './state.js';
+import { cleanupDownloadCache, downloadCacheRoot, TRANSFER_RETENTION_MS } from './download-cache.js';
 import { selectedEntries, sizeEstimate, describeEstimate } from './playlist.js';
 
-const STAGING_PREFIX = '.veo-';
 const PARTIAL_PREFIX = '.veo-part-';
 const STAGED_MEDIA = /^media(?:-(\d+))?\.([A-Za-z0-9]{1,8})$/;
 // Only real media extensions may count as the downloaded file, so a thumbnail
@@ -22,7 +22,14 @@ export function isStagedMedia(name) {
 
 export function runBackend(executable, args, { signal, onLine } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], signal });
+    signal?.throwIfAborted();
+    const child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], signal: process.platform === 'win32' ? undefined : signal });
+    const cancelTree = () => {
+      if (!child.pid || child.exitCode !== null) return;
+      const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+      killer.on('error', () => child.kill());
+    };
+    if (process.platform === 'win32') signal?.addEventListener('abort', cancelTree, { once: true });
     let output = '';
     let errors = '';
     let failure;
@@ -42,6 +49,7 @@ export function runBackend(executable, args, { signal, onLine } = {}) {
     child.stderr.on('data', data => { errors = (errors + data).slice(-16000); });
     child.on('error', error => { failure = error; });
     child.on('close', code => {
+      signal?.removeEventListener('abort', cancelTree);
       lines.close();
       errorLines.close();
       if (failure) reject(failure);
@@ -126,12 +134,15 @@ function downloadSettings(options) {
     'embedMetadata', 'embedThumbnail', 'sponsorblockRemove', 'section'].map(key => [key, options[key] ?? null]));
 }
 
+export function localRequestKey(options) {
+  return digest({ url: options.url, entry: options._entryIndex || null, settings: downloadSettings(options), output: path.resolve(options.output) });
+}
+
 /**
  * Resuming reuses a predictable directory name, so it must not follow a
  * symlink or a file that another process placed there.
  */
-async function prepareStaging(directory, partials) {
-  if (!partials) return mkdtemp(path.join(directory, STAGING_PREFIX));
+async function prepareStaging(partials) {
   try {
     await mkdir(partials);
   } catch (error) {
@@ -174,10 +185,11 @@ export function isSidecar(name) {
  */
 export function stagedTitle(file, metadata, rename) {
   const index = isStagedMedia(path.basename(file)) ? STAGED_MEDIA.exec(path.basename(file))[1] : undefined;
-  if (rename) return index ? `${rename} - ${index}` : rename;
   const fallback = metadata?.title || metadata?.id || 'video';
-  if (!index) return fallback;
-  return metadata?.entries?.[Number(index) - 1]?.title || `${fallback} - ${index}`;
+  const title = index ? metadata?.entries?.[Number(index) - 1]?.title || `${fallback} - ${index}` : fallback;
+  if (rename?.includes('*')) return rename.replaceAll('*', () => title);
+  if (rename) return index ? `${rename} - ${index}` : rename;
+  return title;
 }
 
 function backendArgs(options, backend) {
@@ -286,8 +298,8 @@ export async function planDownload(options, { signal, backendResolver = resolveB
   if (quality.error) throw new Error(quality.error);
   const selected = metadata.entries ? selectedEntries(metadata, options.playlistItems) : [{ entry: metadata, index: 1 }];
   const titles = options.playlist && metadata.entries?.length
-    ? selected.map(({ entry, index }) => options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : entry?.title || `${metadata.title || 'video'} - ${index}`)
-    : [options.rename ?? (metadata.title || metadata.id || 'video')];
+    ? selected.map(({ entry, index }) => options.rename?.includes('*') ? stagedTitle('media.mp4', entry, options.rename) : options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : entry?.title || `${metadata.title || 'video'} - ${index}`)
+    : [stagedTitle('media.mp4', metadata, options.rename)];
   const extension = predictedExtension(options);
   const reserved = new Set();
   const exists = async candidate => reserved.has(candidate) || Boolean(await stat(candidate).catch(() => undefined));
@@ -310,7 +322,7 @@ async function downloadCollection(options, metadata, dependencies) {
     signal?.throwIfAborted();
     reporter?.item?.(offset + 1, entries.length, entry?.title || `Entry ${index}`);
     const itemOptions = { ...options, _entryIndex: index,
-      rename: options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : undefined };
+      rename: options.rename?.includes('*') ? options.rename : options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : undefined };
     try {
       const result = await download(itemOptions, dependencies);
       files.push(...result.files);
@@ -331,14 +343,21 @@ async function downloadCollection(options, metadata, dependencies) {
  * Download one URL. Returns every file that was saved, in the order the
  * backend produced them, so collections and subtitle sidecars are reported.
  */
-export async function download(options, { signal, reporter, backendResolver = resolveBackend, runner = runBackend, onEntry } = {}) {
+export async function download(options, { signal, reporter, backendResolver = resolveBackend, runner = runBackend, onEntry, localRoot = downloadCacheRoot() } = {}) {
   const directory = path.resolve(options.output);
-  await mkdir(directory, { recursive: true });
-  const backend = await prepareBackend(options, { signal, backendResolver, reporter });
-  const metadata = await fetchMetadata(options, { signal, backend, runner, reporter });
-  if (metadata.entries && !options._entryIndex) return downloadCollection(options, metadata, { signal, reporter, backendResolver: async () => backend, runner, onEntry });
+  localRoot = path.resolve(localRoot);
+  await cleanupDownloadCache(localRoot);
+  const requestKey = localRequestKey(options);
+  const stagingPath = path.join(localRoot, `${PARTIAL_PREFIX}${requestKey}`);
+  const existingStage = await lstat(stagingPath).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (existingStage && (!existingStage.isDirectory() || existingStage.isSymbolicLink())) throw new Error(`The partial download path is not a plain directory: ${stagingPath}`);
+  const cached = await readJson(path.join(stagingPath, 'job.json'), null);
+  const readyToTransfer = cached?.requestKey === requestKey && cached.ready?.length && cached.metadata;
+  const backend = readyToTransfer ? null : await prepareBackend(options, { signal, backendResolver, reporter });
+  const metadata = readyToTransfer ? cached.metadata : await fetchMetadata(options, { signal, backend, runner, reporter });
+  if (metadata.entries && !options._entryIndex) return downloadCollection(options, metadata, { signal, reporter, backendResolver: async () => backend, runner, onEntry, localRoot });
   const playlist = false;
-  reporter?.name?.(options.rename ?? (metadata.title || metadata.id || 'video'));
+  reporter?.name?.(stagedTitle('media.mp4', metadata, options.rename));
   const quality = selectQuality({ quality: options.quality, audio: options.audio, closest: options.closestQuality, formats: metadata.formats, playlist });
   if (quality.error) throw new Error(quality.error);
   if (quality.label) reporter?.status(quality.label);
@@ -350,7 +369,7 @@ export async function download(options, { signal, reporter, backendResolver = re
     reporter?.status('Already downloaded; skipped.');
     return { url: options.url, title: metadata.title, files: [], status: 'skipped', saved: 0, skipped: 1 };
   }
-  const staging = await prepareStaging(directory, options.resume ? path.join(directory, `${PARTIAL_PREFIX}${key}`) : undefined);
+  const staging = await prepareStaging(stagingPath);
   const lockPath = path.join(staging, '.lock');
   let lock;
   try { lock = await open(lockPath, 'wx'); }
@@ -360,14 +379,16 @@ export async function download(options, { signal, reporter, backendResolver = re
   }
   const manifestFile = path.join(staging, 'job.json');
   let keepPartial = false;
+  let manifest;
   try {
-    const manifest = await readJson(manifestFile, { version: 1, key, source: sourceKey(metadata, options.url), settings: downloadSettings(options), ready: [], files: [] });
+    manifest = await readJson(manifestFile, { version: 1, requestKey, metadata: { id: metadata.id, title: metadata.title, extractor: metadata.extractor, extractor_key: metadata.extractor_key, formats: metadata.formats?.map(({ height, vcodec, has_drm }) => ({ height, vcodec, has_drm })) }, key, source: sourceKey(metadata, options.url), settings: downloadSettings(options), ready: [], files: [] });
     if (manifest.key !== key || manifest.version !== 1) throw new Error('Partial download belongs to different settings.');
     if (!Array.isArray(manifest.ready) || !Array.isArray(manifest.files)
       || manifest.ready.some(file => typeof file !== 'string' || path.dirname(file) !== staging || !isStagedMedia(path.basename(file)))
       || manifest.files.some(item => typeof item?.source !== 'string' || path.dirname(item.source) !== staging || typeof item.destination !== 'string' || path.dirname(item.destination) !== directory)) {
       throw new Error('Invalid partial download manifest.');
     }
+    delete manifest.expiresAt;
     await writeJson(manifestFile, manifest);
     // Only an after_move event proves that all postprocessing completed.
     let staged = [...new Set(manifest.ready)];
@@ -399,7 +420,8 @@ export async function download(options, { signal, reporter, backendResolver = re
     if (!staged.length) throw new Error('The backend finished without producing a file.');
 
     const files = [];
-    reporter?.status('Saving…');
+    reporter?.status(readyToTransfer ? 'Retrying transfer from local cache…' : 'Saving local download to destination…');
+    await mkdir(directory, { recursive: true });
     for (const stagedFile of staged) {
       const resolved = path.resolve(stagedFile);
       // The backend must only ever hand back a file inside our staging directory.
@@ -420,13 +442,19 @@ export async function download(options, { signal, reporter, backendResolver = re
   } catch (error) {
     // A kept staging directory is the whole point of --resume, and cancellation
     // is the most common reason to want one.
-    keepPartial = Boolean(options.resume);
+    keepPartial = Boolean(options.resume || manifest?.ready?.length);
+    if (manifest?.ready?.length) {
+      manifest.expiresAt = Date.now() + TRANSFER_RETENTION_MS;
+      await writeJson(manifestFile, manifest);
+    }
     throw error;
   } finally {
     await lock.close();
     await rm(lockPath, { force: true });
     reporter?.finish();
-    if (keepPartial) reporter?.status(`Partial download kept in ${staging}. Re-run with --resume to continue it, or delete the folder.`);
+    if (keepPartial) reporter?.status(manifest?.expiresAt
+      ? `Completed download kept locally in ${staging}. Retry within 15 minutes to transfer without downloading again. Expired files are cleaned on the next veo run.`
+      : `Partial download kept locally in ${staging}. Re-run with --resume to continue it.`);
     else await rm(staging, { recursive: true, force: true });
   }
 }

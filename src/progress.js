@@ -25,6 +25,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
   let phase = 'Starting…';
   let started = false;
   let position = '';
+  let hasItem = false;
   let streamName = '';
   const updateTitle = () => setTitle(`veo | ${phase}${name ? ` | ${name}` : ''}`);
   function clear() {
@@ -33,7 +34,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
   }
   return {
     item(index, total, title) {
-      clear(); position = `[${index}/${total}] `; name = cleanText(title); streamName = ''; lastLog = 0;
+      clear(); position = total > 1 ? `[${index}/${total}] ` : ''; hasItem = true; name = cleanText(title); streamName = ''; lastLog = 0;
       stream.write(`${position}${name}\n`);
       phase = 'Starting…'; if (started) updateTitle();
     },
@@ -48,7 +49,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     start(title = '') { started = true; name = cleanText(title); phase = 'Starting…'; updateTitle(); },
     name(title) {
       const next = cleanText(title);
-      if (position && next !== name) { clear(); stream.write(`${position}${next}\n`); }
+      if (hasItem && next !== name) { clear(); stream.write(`${position}${next}\n`); }
       name = next; if (started) updateTitle();
     },
     status(message) {

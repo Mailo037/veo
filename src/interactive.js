@@ -22,7 +22,10 @@ export async function interactiveArgs(config, { signal, input = process.stdin, o
     const profiles = Object.keys(config.profiles || {});
     let defaults = applyProfile(config);
     if (profiles.length) {
-      const profile = await choose(`Profile (${profiles.join(', ')}, none) [none]: `, [...profiles, 'none'], 'none');
+      const hasDefault = profiles.includes('default');
+      const choices = hasDefault ? profiles : [...profiles, 'none'];
+      const fallback = hasDefault ? 'default' : 'none';
+      const profile = await choose(`Profile (${choices.join(', ')}) [${fallback}]: `, choices, fallback);
       if (profile !== 'none') { args.push('--profile', profile); defaults = applyProfile(config, profile); }
     }
     const url = validateUrl((await question('Video or playlist URL: ')).trim());

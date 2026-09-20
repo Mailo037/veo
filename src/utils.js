@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { copyFile, link, unlink } from 'node:fs/promises';
+import { copyFile, link, lstat, unlink } from 'node:fs/promises';
 import { accessSync, constants, statSync } from 'node:fs';
 
 export const QUALITIES = ['best', '2160p', '1440p', '1080p', '720p', '480p', '360p'];
@@ -123,8 +123,8 @@ const NO_HARDLINK = new Set(['EXDEV', 'EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP'
 
 /**
  * Occupy `destination` without ever replacing an existing file. Returns false
- * when the name is taken. Staging lives inside the output directory, so a hard
- * link is an O(1) metadata operation there instead of a full data copy; only
+ * when the name is taken. Local staging can be on another drive, so a hard
+ * link is an O(1) metadata operation when supported; cross-drive saves and
  * filesystems that cannot link fall back to copying. Both paths are race-safe
  * against concurrent veo processes.
  */
@@ -134,10 +134,24 @@ export async function allocate(source, destination, { linkImpl = link, copyImpl 
     return true;
   } catch (error) {
     if (error.code === 'EEXIST') return false;
-    if (!NO_HARDLINK.has(error.code)) throw error;
+    if (error.code === 'EISDIR') {
+      // Some virtual drives report EISDIR for unsupported hard links even when
+      // the source is a regular file. Do not mistake a real directory for media.
+      if (!(await lstat(source)).isFile()) throw error;
+      const existing = await lstat(destination).catch(problem => {
+        if (problem.code === 'ENOENT') return null;
+        throw problem;
+      });
+      if (existing) return false;
+    } else if (!NO_HARDLINK.has(error.code)) throw error;
   }
   try {
     await copyImpl(source, destination, constants.COPYFILE_EXCL);
+    const [sourceInfo, destinationInfo] = await Promise.all([lstat(source), lstat(destination)]);
+    if (sourceInfo.size !== destinationInfo.size) {
+      await unlink(destination);
+      throw new Error('The saved copy has an unexpected size. The local original has been preserved.');
+    }
     return true;
   } catch (error) {
     if (error.code === 'EEXIST') return false;

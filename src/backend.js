@@ -447,7 +447,7 @@ export async function inspectBackend({ signal } = {}) {
  * cannot serve the current platform (notably Windows on ARM).
  * onStatus receives plain strings. Throws on cancellation or acquisition failure.
  */
-export async function resolveBackend({ signal, onStatus } = {}) {
+export async function resolveBackend({ signal, onStatus, offline = false } = {}) {
   if (signal !== undefined && !(signal instanceof AbortSignal)) throw new TypeError('signal must be an AbortSignal.');
   if (onStatus !== undefined && typeof onStatus !== 'function') throw new TypeError('onStatus must be a function.');
   signal?.throwIfAborted();
@@ -467,6 +467,9 @@ export async function resolveBackend({ signal, onStatus } = {}) {
   const ffmpegLocation = await resolveMediaTools({ signal, status, directory });
   if (ytDlp) status('Using VEO_YT_DLP_PATH override.');
   else if (installed) status(`Using the installed yt-dlp ${installed.release}.`);
+  if (offline && !ytDlp && !installed && !await matches(path.join(directory, `yt-dlp${exeSuffix()}`), HASHES[asset], signal)) {
+    throw new Error('yt-dlp is missing or damaged. Run veo doctor fix without --offline to download it.');
+  }
   const backend = ytDlp || installed?.path || await acquire(asset, directory, signal, status);
   signal?.throwIfAborted();
   return { ytDlp: backend, ffmpegLocation };

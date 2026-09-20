@@ -19,7 +19,7 @@ Options:
                            downloads 2160p. Use --closest-quality for the nearest
                            available resolution instead.
   -o, --output <path>       Output directory (default: current directory)
-  -r, --rename <name>       Custom filename without extension (also used in tab title)
+  -r, --rename <name>       Filename without extension; * inserts the original title
   --closest-quality         Pick the nearest available resolution, above or below
   --open                   Open the saved file with your default app
   --audio                  Download audio only (default: mp3)
@@ -55,6 +55,8 @@ Commands:
   veo update [--check]     Update veo itself with npm
   veo backend update       Install a newer yt-dlp release (see veo backend --help)
   veo doctor               Diagnose the local setup
+  veo flush                Stop veo runs and clear temporary downloads and jobs
+  veo stats                Show persistent download statistics
   veo version              Show the installed version
   veo config edit|path|profiles  Manage defaults and named profiles
 
@@ -181,7 +183,7 @@ export function parseCli(args, { config = {} } = {}) {
   if (values['retry-failed'] && (positionals.length || values['batch-file'])) throw new Error('--retry-failed cannot be combined with URLs or --batch-file.');
   if (!values.output.trim()) throw new Error('The output directory cannot be empty.');
   if (values.rename !== undefined && !cleanText(values.rename)) throw new Error('The custom filename cannot be empty.');
-  if (positionals.length > 1 && values.rename !== undefined) throw new Error('--rename only applies to a single URL.');
+  if (positionals.length > 1 && values.rename !== undefined && !values.rename.includes('*')) throw new Error('--rename only applies to a single URL unless the name contains * for the original title.');
   if (values.audio && values.quality !== 'best' && typed.quality) throw new Error('--quality is for video; omit it when using --audio.');
   if (values.audio && values['closest-quality'] && typed.closest) throw new Error('--closest-quality is for video; omit it when using --audio.');
   if (values['closest-quality'] && values.quality === 'best' && typed.closest) throw new Error('--closest-quality requires a numeric --quality such as 1080p.');
@@ -218,6 +220,16 @@ export function parseCli(args, { config = {} } = {}) {
 }
 
 export async function main(args = process.argv.slice(2), { config } = {}) {
+  if (args[0] === 'stats') {
+    try { return await (await import('./stats.js')).statsMain(args.slice(1)); }
+    catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
+  if (args[0] === 'flush') {
+    try { return await (await import('./flush.js')).flushMain(args.slice(1)); }
+    catch (error) { process.stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
+  const { cleanupDownloadCache } = await import('./download-cache.js');
+  await cleanupDownloadCache().catch(error => process.stderr.write(`veo: Could not clean expired local downloads: ${readableError(error)}\n`));
   // update/upgrade/check subcommands are handled before URL validation.
   if (['update', 'upgrade', 'check'].includes(args[0])) {
     if (args[0] === 'check' && args[1] !== 'update') {
@@ -251,9 +263,13 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
   const reporter = createReporter();
   const controller = new AbortController();
   const cancel = () => controller.abort();
+  let unregister;
   process.once('SIGINT', cancel);
   process.once('SIGTERM', cancel);
   try {
+    if (!args.includes('--help') && !args.includes('-h') && !args.includes('--version')) {
+      unregister = await (await import('./flush.js')).registerRun(cancel);
+    }
     const loaded = config ?? await loadConfig();
     for (const warning of loaded.warnings || []) process.stderr.write(`veo: ${warning}\n`);
     if (!args.length && process.stdin.isTTY && process.stderr.isTTY) {
@@ -281,7 +297,7 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
       options.urls.push(...lines.map(validateUrl));
       options.url = options.urls[0];
       if (!options.urls.length) throw new Error('The URL list is empty.');
-      if (options.rename && options.urls.length > 1) throw new Error('--rename only applies to a single URL.');
+      if (options.rename && options.urls.length > 1 && !options.rename.includes('*')) throw new Error('--rename only applies to a single URL unless the name contains * for the original title.');
       if (options.listFormats && options.urls.length > 1) throw new Error('--list-formats accepts exactly one URL.');
     }
     reporter.start(options.rename);
@@ -309,7 +325,8 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
       return 0;
     }
     const { download } = await import('./downloader.js');
-    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems });
+    const { createStatsRecorder } = await import('./stats.js');
+    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, recordStats: createStatsRecorder() });
     if (result !== 0) return result;
     const notice = await maybeUpdateNotice({ currentVersion: await packageVersion() });
     if (notice) process.stderr.write(`${notice}\n`);
@@ -319,6 +336,7 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     process.stderr.write(`veo: ${readableError(error)}\n`);
     return controller.signal.aborted || error.name === 'AbortError' ? 130 : 1;
   } finally {
+    await unregister?.();
     process.removeListener('SIGINT', cancel);
     process.removeListener('SIGTERM', cancel);
   }

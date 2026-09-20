@@ -73,6 +73,33 @@ test('every documented key maps to a supported type', () => {
   assert.ok(Object.keys(CONFIG_KEYS).length >= 15);
 });
 
+test('invalid config reports the file, exact location and actionable syntax reason', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-errors-'));
+  const file = path.join(directory, 'config.json');
+  try {
+    for (const [text, reason, location] of [
+      [String.raw`{
+"output": "G:\Meine Ablage\Filme"
+}`, /Invalid escape sequence.*forward slashes/, /line 2, column 15/],
+      ['{\n```json\n"audio": true\n```\n}', /Markdown code fences/, /line 2, column 1/],
+      ['{\n"audio": true,\n}', /Trailing commas/, /line 3, column 1/],
+      ['{\n"audio" true\n}', /Expected a colon/, /line 2, column 9/],
+      ['{\n"audio": true\n"open": false}', /Expected a comma/, /line 3, column 1/],
+      ['\uFEFF{\r\n// note\r\n"audio": true,\r\n}', /Trailing commas/, /line 4, column 1/],
+      ['{\n/* unfinished', /Unterminated block comment/, /line 2, column 1/],
+      ['{"audio": true', /closing }/, /line 1, column 15/],
+    ]) {
+      await writeFile(file, text);
+      await assert.rejects(loadConfig({ file }), error => {
+        assert.ok(error.message.includes(file));
+        assert.match(error.message, reason);
+        assert.match(error.message, location);
+        return true;
+      });
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('config edit fills new and empty files and preserves existing settings', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-template-'));
   const file = path.join(directory, 'config.json');
@@ -87,9 +114,12 @@ test('config edit fills new and empty files and preserves existing settings', as
     await writeFile(file, original);
     await prepareConfigEdit(file);
     const annotated = await readFile(file, 'utf8');
-    assert.ok(annotated.endsWith(original));
+    assert.ok(annotated.includes('"open": true // keep my comment'));
     assert.match(annotated, /commented configuration template/);
-    assert.deepEqual((await loadConfig({ file })).config, { quality: '480p', open: true });
+    const loaded = (await loadConfig({ file })).config;
+    assert.equal(loaded.quality, '480p');
+    assert.equal(loaded.open, true);
+    assert.deepEqual(loaded.profiles.default, {});
     await prepareConfigEdit(file);
     assert.equal(await readFile(file, 'utf8'), annotated, 'do not duplicate the guide');
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -113,6 +143,8 @@ test('legacy generated comments become English without changing user settings or
   assert.match(translated, /Subtitles and additional information/);
   assert.match(translated, /"music":/);
   assert.match(translated, /My custom note/);
-  assert.deepEqual(JSON.parse(stripConfigComments(translated)), JSON.parse(stripConfigComments(legacy)));
+  const expected = JSON.parse(stripConfigComments(legacy));
+  expected.profiles.default = {};
+  assert.deepEqual(JSON.parse(stripConfigComments(translated)), expected);
   assert.equal(withConfigTemplate(translated), translated);
 });

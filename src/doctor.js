@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { inspectBackend, findOnPath } from './backend.js';
+import { inspectBackend, findOnPath, resolveBackend } from './backend.js';
 import { loadConfig } from './config.js';
+import { cacheBase } from './paths.js';
 import { fetchLatestVersion, compareVersions, packageVersion, defaultRegistry, veoCacheBase } from './updater.js';
 import { cleanText, readableError } from './utils.js';
 
@@ -10,6 +11,7 @@ export const DOCTOR_HELP = `veo doctor - diagnose the local setup
 
 Usage:
   veo doctor [options]
+  veo doctor fix [options]
 
 Options:
   -o, --output <path>   Output directory to check (default: current directory)
@@ -19,7 +21,10 @@ Options:
 Checks Node.js, the output directory, the backend cache, yt-dlp, FFmpeg/FFprobe,
 reachability of the registry and the yt-dlp release host, and leftover partial
 downloads. Downloads no backend and changes nothing but its own probe files and
-the backend cache directory. Exit status is 0 when no check fails, 1 otherwise.
+the backend cache directory. The fix command restores managed tools (downloads
+yt-dlp if needed unless --offline), creates the requested output directory, and
+checks again. It does not change PATH, overrides or config values.
+Exit status is 0 when no check fails, 1 otherwise.
 `;
 
 const LABEL_WIDTH = 18;
@@ -135,7 +140,9 @@ export async function collectChecks({
   push(cacheAccess.ok ? 'ok' : 'fail', 'Backend cache', `${report.directory || veoCacheBase({ platform, env })}${cacheAccess.ok ? '' : ` — ${cacheAccess.reason}`}`);
 
   const yt = report.ytDlp || {};
-  if (yt.present) {
+  if (yt.present && yt.source !== 'override' && !yt.verified) {
+    push('fail', 'yt-dlp', `${yt.path} — SHA-256 verification failed; run veo doctor fix`);
+  } else if (yt.present) {
     let detail = `${yt.path} (${yt.source === 'override' ? 'VEO_YT_DLP_PATH' : `release ${report.release}${yt.verified ? ', SHA-256 verified' : ''}`})`;
     try {
       const out = await runProbe(yt.path, ['--version']);
@@ -167,13 +174,18 @@ export async function collectChecks({
   // Only relevant when the bundled tools cannot serve this platform (e.g. Windows on ARM).
   const systemFfmpeg = await find(['ffmpeg']);
   const systemFfprobe = await find(['ffprobe']);
-  push(systemFfmpeg && systemFfprobe ? 'ok' : 'warn', 'System FFmpeg',
-    systemFfmpeg && systemFfprobe ? `${path.dirname(systemFfmpeg)} (fallback)` : 'not on PATH — only needed when the bundled binaries are unavailable');
+  const mediaReady = ['ffmpeg', 'ffprobe'].every(name => checks.some(check => check.label === name && check.level === 'ok'));
+  push(systemFfmpeg && systemFfprobe || mediaReady ? 'ok' : 'warn', 'System FFmpeg',
+    systemFfmpeg && systemFfprobe ? `${path.dirname(systemFfmpeg)} (fallback)` : mediaReady ? 'not required — the selected FFmpeg and FFprobe work' : 'not on PATH — run veo doctor fix to prepare the bundled tools');
 
   const partials = await readdir(target, { withFileTypes: true }).catch(() => []);
   const leftover = partials.filter(entry => entry.isDirectory() && entry.name.startsWith('.veo-') && entry.name !== '.veo-history').map(entry => entry.name);
-  if (leftover.length) push('warn', 'Partial data', `${leftover.length} leftover folder${leftover.length === 1 ? '' : 's'} in the output directory (${leftover.slice(0, 3).join(', ')}${leftover.length > 3 ? ', …' : ''}). Re-run with --resume to continue, or delete them.`);
+  if (leftover.length) push('warn', 'Partial data', `${leftover.length} legacy folder${leftover.length === 1 ? '' : 's'} in the output directory (${leftover.slice(0, 3).join(', ')}${leftover.length > 3 ? ', …' : ''}). These are not migrated to the local cache; inspect them before removing them.`);
   else push('ok', 'Partial data', 'no leftover download folders');
+  const localDownloads = path.join(cacheBase({ env }), 'downloads');
+  const cachedDownloads = await readdir(localDownloads, { withFileTypes: true }).catch(() => []);
+  const count = cachedDownloads.filter(entry => entry.isDirectory() && /^\.veo-part-[a-f0-9]{24}$/.test(entry.name)).length;
+  push(count ? 'warn' : 'ok', 'Local downloads', `${localDownloads}: ${count} retained download folder(s). Failed transfers expire after 15 minutes and are cleaned on the next run; unfinished --resume downloads are kept.`);
 
   try {
     const loaded = await (loadConfigImpl || loadConfig)({ env });
@@ -219,6 +231,8 @@ export async function doctorMain(args = [], {
 } = {}) {
   let offline = false;
   let output;
+  const fix = args[0] === 'fix';
+  if (fix) args = args.slice(1);
   for (let index = 0; index < args.length; index++) {
     const token = args[index];
     if (token === '--offline') offline = true;
@@ -229,7 +243,23 @@ export async function doctorMain(args = [], {
     } else throw new Error(`Unknown option for veo doctor: ${cleanText(token)}. Run veo doctor --help for usage.`);
   }
   const version = deps.version ?? await packageVersion();
+  const repairs = [];
+  if (fix) {
+    stdout.write('Repairing local setup…\n');
+    try {
+      await (deps.repairBackend || resolveBackend)({ offline, onStatus: message => stdout.write(`${cleanText(message)}\n`) });
+      stdout.write('Managed tools are ready.\n');
+    } catch (error) {
+      repairs.push({ level: 'fail', label: 'Repair tools', detail: readableError(error) });
+    }
+    if (output) {
+      try { await mkdir(path.resolve(cwd, output), { recursive: true }); }
+      catch (error) { repairs.push({ level: 'fail', label: 'Repair output', detail: readableError(error) }); }
+    }
+    stdout.write('Checking setup after repairs…\n\n');
+  }
   const checks = await collectChecks({ version, cwd, env, offline, output, registry, ...deps });
+  checks.push(...repairs);
   const summary = summarize(checks);
   stdout.write(formatReport({ version, checks, summary }));
   if (summary.failed) stderr.write('veo: some checks failed. See the report above.\n');

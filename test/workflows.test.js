@@ -5,16 +5,36 @@ import path from 'node:path';
 import os from 'node:os';
 import { parseCli } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
-import { download, partialKey, planDownload } from '../src/downloader.js';
+import { download as actualDownload, localRequestKey, partialKey, planDownload } from '../src/downloader.js';
 import { interactiveArgs } from '../src/interactive.js';
 import { retryOptions, runJob } from '../src/jobs.js';
 import { createReporter } from '../src/progress.js';
 import { selectedEntries, sizeEstimate, validateItems } from '../src/playlist.js';
 
+const download = (options, dependencies = {}) => actualDownload(options, { localRoot: options.output, ...dependencies });
+
 const url = 'https://example.test/list';
 const backendResolver = async () => ({ ytDlp: 'fake', ffmpegLocation: 'tools' });
 const sink = () => ({ text: '', write(value) { this.text += value; } });
 const reporter = () => createReporter(sink(), { setTitle() {} });
+
+test('default profile applies automatically, explicit profiles replace it and flags win', async () => {
+  const config = { open: true, profiles: { default: { quality: '720p', output: './everyday' }, music: { audio: true, format: 'mp3' } } };
+  assert.equal(parseCli([url], { config }).quality, '720p');
+  assert.equal(parseCli([url, '--profile', 'default'], { config }).output, './everyday');
+  assert.equal(parseCli([url, '-q', '1080p'], { config }).quality, '1080p');
+  assert.equal(parseCli([url, '--no-open'], { config }).open, false);
+  const music = parseCli([url, '--profile', 'music'], { config });
+  assert.equal(music.audio, true);
+  assert.equal(music.quality, 'best');
+  assert.equal(music.open, true);
+  const answers = ['', url, 'video', 'n', '', '', 'y', 'y'];
+  const prompts = [];
+  const args = await interactiveArgs(config, { output: sink(), ask: async prompt => { prompts.push(prompt); return answers.shift(); }, inspect: async () => ({ formats: [{ height: 720, vcodec: 'h264' }] }) });
+  assert.match(prompts[0], /\[default\]/);
+  assert.equal(parseCli(args, { config }).quality, '720p');
+  assert.equal(parseCli(args, { config }).output, './everyday');
+});
 
 test('profiles merge defaults, explicit flags override and booleans can be disabled', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-profile-'));
@@ -141,7 +161,9 @@ test('dry run reserves duplicate names and respects playlist selection and renam
     const plan = await planDownload({ url, output: directory, playlist: true, playlistItems: '1-2' }, { backendResolver, runner: async () => JSON.stringify(metadata) });
     assert.deepEqual(plan.entries.map(entry => path.basename(entry.path)), ['Same.mp4', 'Same (1).mp4']);
     const named = await planDownload({ url, output: directory, playlist: true, playlistItems: '3', rename: 'Custom' }, { backendResolver, runner: async () => JSON.stringify(metadata) });
-    assert.equal(path.basename(named.entries[0].path), 'Custom - 003.mp4');
+      assert.equal(path.basename(named.entries[0].path), 'Custom - 003.mp4');
+      const wildcard = await planDownload({ url, output: directory, playlist: true, playlistItems: '1-2', rename: 'movie_*' }, { backendResolver, runner: async () => JSON.stringify(metadata) });
+      assert.deepEqual(wildcard.entries.map(entry => path.basename(entry.path)), ['movie_Same.mp4', 'movie_Same (1).mp4']);
     assert.deepEqual(await readdir(directory), []);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

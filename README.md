@@ -48,7 +48,7 @@ veo <url> [<url>...] [options]
 Options:
   -q, --quality <quality>   best, 2160p, 1440p, 1080p, 720p, 480p, 360p
   -o, --output <path>       Output directory (default: current working directory)
-  -r, --rename <name>       Custom filename without extension (also used in tab title)
+  -r, --rename <name>       Filename without extension; * inserts the original title
   --closest-quality         Nearest available resolution instead of an upper bound
   --open                    Open the saved file with your default app
   --audio                   Audio only (MP3 by default)
@@ -100,7 +100,7 @@ npx @mailo037/veo "https://example.com/video.mp4" --output ./downloads
   failed.
 - Playlists, channels and other collections are refused by default with a hint. Add
   `--playlist` to download every entry. Each entry keeps its own title; `--rename` applies
-  a name prefix per entry (`My Name - 001`).
+  a name prefix per entry (`My Name - 001`), or substitutes each title with `movie_*`.
 - Use `--playlist-items 1,3-5` to select entries by their original, one-based index.
   Playlists are processed one entry at a time: a failed entry does not discard successful
   files or stop the remaining entries. Before downloading, veo displays the selected count
@@ -152,20 +152,35 @@ veo --retry-failed "C:\path\to\job.json"
   is appended automatically. Use `-o` for the directory. Invalid filename characters are
   sanitized and overly long names shortened. Existing files are never intentionally
   overwritten: duplicates get ` (1)`, ` (2)`, etc.
+- Use `-r "movie_*"` or `"rename": "movie_*"` in your config/profile to insert the
+  original title: `My Film` becomes `movie_My Film.mp4`. Every `*` is substituted.
+  Quote the pattern in your shell. Patterns also work with URL batches and playlists.
 - Subtitles and thumbnails are saved beside the media file under the same base name
   (`My Video.mp4` → `My Video.en.vtt`).
-- Downloads use a private staging directory inside the output directory. The finished file
-  is linked (or, on filesystems without hard links, copied) to a collision-safe final name.
-  Staging is removed on ordinary failure or Ctrl+C; force-killing the process may leave
-  `.veo-*` directories to remove manually, and `veo doctor` reports leftovers.
-- `--resume` keeps partial data in `.veo-part-<source-and-settings-hash>` instead, and
-  continues it on a later run. The hash separates platforms, videos, quality, media type,
-  format, sections and subtitle/metadata options. A manifest records backend-confirmed
+- Downloads and media processing first finish in the local per-user veo cache, under
+  `downloads` (`%LOCALAPPDATA%\veo\downloads` on Windows). The destination is only written
+  after the media is ready. Saving uses a hard link when supported or an exclusive copy
+  across drives/cloud mounts; copied file sizes are checked. Existing files are never
+  overwritten. The local original is removed only after files and history are saved.
+  Local disk space is therefore needed for the complete download and processing files.
+- If saving fails or is cancelled after media processing completes, the local original and
+  sidecars are kept for **15 minutes**, even without `--resume`. Repeat the same command or
+  use the printed `--retry-failed` command to retry the transfer. Individual completed
+  downloads can be recovered without contacting their source again. The same source,
+  media settings and destination identify a cached transfer; changing those starts a new
+  download. Expired copies are removed on the next veo invocation, not by a background
+  timer while veo is closed. Active transfers are never expired. Another failed transfer
+  starts a fresh 15-minute retention period.
+- `--resume` also keeps unfinished downloads in local `.veo-part-<request-hash>` folders
+  until resumed; unfinished data has no automatic expiry. Without `--resume`, unfinished
+  downloads are discarded on failure or cancellation. The hash separates source URLs,
+  playlist entries, destinations, quality, media type, format, sections and subtitle/metadata
+  options. A manifest records backend-confirmed
   completion and saved files, so an unprocessed file is not mistaken for a finished video.
   Each playlist entry has its own state. Completed entries survive later failures and are
   skipped when resuming the same selection. Partial downloads are never resumed without
-  `--resume`. Old `.veo-part-<video id>` folders are left untouched because their settings
-  cannot be verified.
+  `--resume`. Legacy partial folders in the output directory are left untouched; the new
+  local cache does not automatically migrate them.
 - A lock prevents two resume processes from using the same partial folder. Normal failures
   and Ctrl+C release it. After a force kill, remove the named `.lock` file only after making
   sure no veo process still uses that folder.
@@ -249,10 +264,17 @@ disables stored subtitle languages and subtitle embedding for that invocation.
 
 ### Named profiles
 
+If no profile is selected, `profiles.default` is applied automatically. You can also select
+it explicitly with `--profile default`. Other named profiles use global defaults rather
+than inheriting `default`. The wizard preselects `default` when it exists.
+`veo config edit` adds an empty `default` profile to existing configurations if missing,
+preserving existing settings. An empty profile does not change download behavior.
+
 ```json
 {
   "output": "D:\\Videos",
   "profiles": {
+    "default": { "quality": "1080p", "resume": true },
     "music": { "audio": true, "format": "mp3", "output": "D:\\Music" },
     "archive": { "quality": "1080p", "embedMetadata": true, "subLangs": "de,en" }
   }
@@ -306,7 +328,11 @@ veo config edit       # create/open config, including example profiles
 veo config profiles   # list available profiles
 veo config path       # show the config file location
 veo doctor            # diagnose the local setup; exit 1 if a check fails
+veo doctor fix        # restore missing or damaged managed tools
 veo doctor --offline  # skip the network checks
+veo stats             # persistent download totals; --json for scripting
+veo flush             # stop runs, clear temporary downloads and retry jobs
+veo flush --stats     # the same, and reset the statistics
 veo update            # install the latest veo with npm
 veo update --check    # only check for a newer veo
 veo upgrade           # alias for veo update
@@ -321,6 +347,26 @@ never uses a shell on Linux/macOS, passes fixed arguments only, and prints the m
 command on any failure. The registry can be overridden with `VEO_REGISTRY` (or npm's
 `npm_config_registry`) for mirrors and proxies.
 
+### `veo flush`
+
+Run `veo flush` to stop active veo runs started with this version, then remove
+temporary local downloads, including the 15-minute retained files and unfinished
+resume data, and cached retry job JSON files. Those jobs can no longer be retried.
+Saved media, output history, config/profiles and backend binaries are kept.
+Cleanup waits for cancellation; if a run cannot stop, it fails without deleting
+download or job files. Locked folders from older or interrupted processes are
+skipped and reported. Only veo's own per-user cache is cleaned. Statistics are
+preserved unless `--stats` is given: `veo flush --stats` resets them too.
+
+### `veo stats`
+
+Shows saved videos/audio, failed attempts, skips, cancellations and total time spent
+on download requests (including preparation, processing and saving). Parallel run
+times are added together. Playlist entries count individually; retries are new
+attempts. Active requests are recorded when they finish. Tracking starts with this
+version; previous downloads are not imported. `veo stats --json` returns the totals
+as JSON. Statistics contain counters and timestamps, not URLs or filenames.
+
 ### `veo doctor`
 
 Prints one line per check: `ok`, `warn` or `fail`. It inspects Node.js, the platform, the
@@ -330,11 +376,18 @@ partial downloads, the npm registry and the yt-dlp release host. It downloads no
 only creates its own probe files plus the backend cache directory. Exit status is `1` when
 at least one check fails.
 
+Run `veo doctor fix` to restore missing or damaged managed tools and check again.
+It stages bundled FFmpeg/FFprobe and downloads verified yt-dlp when needed. With
+`--offline`, it only uses local binaries; missing yt-dlp is reported for an online retry.
+Use `-o PATH` to create and check an output directory. Config errors and invalid overrides
+are reported for manual correction; PATH and config values are never rewritten.
+A missing system FFmpeg is not a warning when the selected media tools work.
+
 ## Supported sites and backend
 
 YouTube, X/Twitter, TikTok, Vimeo, Reddit, Instagram, and [many other yt-dlp sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) are supported **when publicly accessible and technically available**. Support changes with websites, regions, rate limits, and backend versions; it is not a guarantee that every URL will work.
 
-Official standalone yt-dlp is acquired on first download and cached outside the package directory; help, version and doctor never download the backend. The release is pinned and SHA-256 verified against hashes shipped with this package. FFmpeg and FFprobe are supplied by the `ffmpeg-static` and `ffprobe-static` dependencies during npm installation. These binaries have their own licenses; see their upstream packages. Normal installs must allow dependency install scripts. No Python installation is needed on supported standalone platforms.
+Official standalone yt-dlp is acquired on first download and cached outside the package directory; help, version and plain doctor never download the backend. The release is pinned and SHA-256 verified against hashes shipped with this package. FFmpeg and FFprobe are supplied by the `ffmpeg-static` and `ffprobe-static` dependencies during npm installation. These binaries have their own licenses; see their upstream packages. Normal installs must allow dependency install scripts. No Python installation is needed on supported standalone platforms.
 
 The existing Node executable is explicitly enabled as yt-dlp's JavaScript runtime for YouTube. Local yt-dlp configuration and plugins are disabled for predictable execution. Arguments are passed without a shell.
 
@@ -391,7 +444,9 @@ npm publish
 The smoke test generates a two-second synthetic video with FFmpeg, serves it on loopback,
 and runs real yt-dlp downloads. It checks default output, the quality cap, duplicate names,
 audio extraction, conversion, dry-run, format listing, JSON output, metadata embedding,
-resume, batch behaviour and nonzero failures. It needs network access once for yt-dlp
+resume, batch behaviour, playlist selection and nonzero failures, and verifies that a
+finished download whose destination was unavailable is retried from the local cache
+without contacting the source again. It needs network access once for yt-dlp
 acquisition; it downloads no third-party video. Unit tests require no network.
 
 The published tarball only includes `bin/`, `src/`, package metadata, README and LICENSE.
@@ -402,11 +457,14 @@ direct checkout execution).
 Continuous integration runs the unit tests on Windows, macOS and Linux for Node 22 and 24,
 runs the end-to-end smoke test on Node 22, and verifies the packed tarball.
 
-Modules separate argument parsing (`src/cli.js`), configuration (`src/config.js`), backend
-setup (`src/backend.js`), backend updates (`src/backend-update.js`), download orchestration
-(`src/downloader.js`), diagnostics (`src/doctor.js`), progress (`src/progress.js`), and
-helpers (`src/utils.js`, `src/paths.js`, `src/version.js`) so new options and providers can
-be added without replacing the CLI.
+Modules separate argument parsing (`src/cli.js`), configuration (`src/config.js`,
+`src/config-errors.js`, `src/config-template.js`), backend setup (`src/backend.js`),
+backend updates (`src/backend-update.js`), download orchestration (`src/downloader.js`,
+`src/download-cache.js`), retry jobs (`src/jobs.js`), playlists (`src/playlist.js`),
+statistics and cleanup (`src/stats.js`, `src/flush.js`), diagnostics (`src/doctor.js`),
+progress (`src/progress.js`), and helpers (`src/utils.js`, `src/paths.js`,
+`src/state.js`, `src/version.js`) so new options and providers can be added without
+replacing the CLI.
 
 ## License
 

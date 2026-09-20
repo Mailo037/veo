@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { parseCli } from '../src/cli.js';
@@ -24,6 +24,8 @@ test('CLI defaults, flags, help, and version', () => {
   assert.equal(parseCli([url, '--resume']).resume, true);
   assert.equal(parseCli([url, '--audio', '--rename', 'My Music', '--open']).open, true);
   assert.deepEqual(parseCli([url, url.replace('video', 'other')]).urls.length, 2);
+  assert.equal(parseCli([url, url, '--rename', 'movie_*']).rename, 'movie_*');
+  assert.equal(parseCli([url, url], { config: { rename: 'movie_*' } }).rename, 'movie_*');
   assert.equal(parseCli([url, '-q', '1080p', '--closest-quality']).closestQuality, true);
   assert.equal(parseCli([url, '--sub-langs', 'de,en']).subs, true);
   assert.equal(parseCli([url, '-N', '4']).concurrentFragments, 4);
@@ -111,6 +113,25 @@ test('progress contains all requested fields, with honest unknown totals', () =>
   assert.match(line, /50%/); assert.match(line, /1.0 KiB\/s/);
   assert.match(line, /1.0 KiB \/ 2.0 KiB/); assert.match(line, /ETA 0:02/);
   assert.match(formatProgress({}), /\?%/);
+});
+
+test('virtual-drive EISDIR falls back to copying files without replacing directories or files', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-virtual-drive-'));
+  const linkImpl = async () => { throw Object.assign(new Error('unsupported link'), { code: 'EISDIR' }); };
+  try {
+    const source = path.join(directory, 'source.mp4');
+    const destination = path.join(directory, 'saved.mp4');
+    await writeFile(source, 'completed download');
+    assert.equal(await allocate(source, destination, { linkImpl }), true);
+    assert.equal(await readFile(destination, 'utf8'), 'completed download');
+    await writeFile(destination, 'keep existing');
+    assert.equal(await allocate(source, destination, { linkImpl }), false);
+    assert.equal(await readFile(destination, 'utf8'), 'keep existing');
+    const occupied = path.join(directory, 'folder.mp4');
+    await mkdir(occupied);
+    assert.equal(await allocate(source, occupied, { linkImpl }), false);
+    await assert.rejects(allocate(occupied, path.join(directory, 'bad.mp4'), { linkImpl }), { code: 'EISDIR' });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test('readable backend and filesystem errors', () => {
   for (const [message, pattern] of [['Unsupported URL', /not supported/], ['This video is private', /private/], ['Video deleted', /deleted/], ['Connection timed out', /Network/], ['Requested format is not available', /format is unavailable/], ['DRM-protected', /DRM/]]) assert.match(readableError(new Error(message)), pattern);

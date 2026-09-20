@@ -2,6 +2,60 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.4.0
+
+### Added
+
+- **Local download cache**: downloads and media processing now finish in the per-user veo
+  cache before the destination is written, so the output location is only touched once the
+  media is ready. Saving uses a hard link where supported and an exclusive copy across
+  drives or cloud mounts, with copied sizes verified. Existing files are still never
+  overwritten. The local original is removed only after files and history are saved.
+- **Recoverable transfers**: if saving fails or is cancelled after processing completed, the
+  finished local original and its sidecars are kept for **15 minutes** — with or without
+  `--resume`. Repeat the same command, or use the printed `--retry-failed` command, to retry
+  the transfer without contacting the source again. The same source, media settings and
+  destination identify a cached transfer; a repeated failure starts a fresh retention
+  period. Expired copies are removed on the next veo invocation, never by a background
+  timer, and active transfers are never expired.
+- **`veo stats`**: persistent counters for saved videos and audio, failed attempts, skips,
+  cancellations and total elapsed download-request time. `veo stats --json` prints the
+  totals as JSON. Playlist entries count individually and retries are new attempts.
+  Statistics hold counters and timestamps, not URLs or filenames.
+- **`veo flush [--stats]`**: stops active veo runs started with this version, then removes
+  temporary local downloads — including the 15-minute retained copies and unfinished resume
+  data — plus cached retry job files. Saved media, output history, config/profiles and
+  backend binaries are kept, and `--stats` additionally resets the statistics.
+- **`veo doctor fix`**: restores missing or damaged managed tools and then checks again,
+  staging bundled FFmpeg/FFprobe and downloading hash-verified yt-dlp when needed. With
+  `--offline` only local binaries are used, and `-o PATH` creates and checks an output
+  directory.
+- **Title placeholders** in `--rename` and the config/profile `rename` key: `-r "movie_*"`
+  inserts the original title (`movie_My Film.mp4`), and every `*` is substituted. Placeholders
+  make `--rename` usable with several URLs and playlists, where a plain name is still refused.
+- **`profiles.default`** is applied automatically when no profile is selected; other named
+  profiles keep using the global defaults instead of inheriting `default`. `veo config edit`
+  adds an empty `default` profile to existing configurations without changing settings, and
+  the wizard preselects it.
+- Config syntax errors now name the line and column and explain the likely mistake, such as
+  Markdown code fences, a trailing comma or an unescaped Windows path, without echoing
+  private config values.
+- The packaged-tarball check now verifies that every relative import resolves inside the
+  tarball and that the tarball, `package.json` and CHANGELOG versions agree, so an
+  incompletely bumped or incompletely packed release fails before publishing.
+
+### Changed
+
+- `veo doctor` no longer warns about a missing system FFmpeg when the selected FFmpeg and
+  FFprobe work, and it reports retained local downloads and copied-size mismatches.
+- Resume state and partial data now live in the local per-user cache under `downloads`
+  instead of the output directory, and the request hash also separates destinations,
+  playlist entries and source URLs. Legacy `.veo-part-<video id>` folders in the output
+  directory are left untouched and are not migrated automatically.
+- Unfinished downloads are discarded on failure or cancellation unless `--resume` is given;
+  a completed download is the only thing retained for a transfer retry. Local disk space is
+  therefore needed for the complete download and its processing files.
+
 ## 1.3.0
 
 ### Added

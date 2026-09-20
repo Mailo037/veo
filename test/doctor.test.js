@@ -71,6 +71,7 @@ test('a healthy setup reports no problems', async () => {
   try {
     const checks = await collectChecks(options);
     assert.equal(summarize(checks).failed, 0);
+    assert.equal(checks.find(check => check.label === 'System FFmpeg').level, 'ok');
     assert.ok(checks.some(check => check.label === 'yt-dlp' && check.detail.includes('2026.08.19')));
     assert.equal(await doctorMain(['--offline'], options), 0);
     assert.match(streams.stdoutText, /No problems found/);
@@ -141,5 +142,20 @@ test('doctor help and argument handling', async () => {
     assert.equal(streams.stdoutText, DOCTOR_HELP);
     await assert.rejects(doctorMain(['--nope'], dir.options), /Unknown option for veo doctor/);
     await assert.rejects(doctorMain(['-o'], dir.options), /--output requires a directory/);
+  } finally { await rm(dir.directory, { recursive: true, force: true }); }
+});
+
+test('doctor fix forwards offline mode, rechecks repairs and reports repair failures', async () => {
+  const dir = await deps();
+  let repaired = false;
+  try {
+    const options = { ...dir.options,
+      repairBackend: async ({ offline }) => { assert.equal(offline, true); repaired = true; },
+      inspect: async () => { assert.equal(repaired, true); return healthyBackend(dir.directory); },
+    };
+    assert.equal(await doctorMain(['fix', '--offline'], options), 0);
+    assert.match(dir.streams.stdoutText, /Checking setup after repairs/);
+    assert.equal(await doctorMain(['fix', '--offline'], { ...options, repairBackend: async () => { throw new Error('repair failed'); } }), 1);
+    assert.match(dir.streams.stdoutText, /repair failed/);
   } finally { await rm(dir.directory, { recursive: true, force: true }); }
 });

@@ -37,11 +37,13 @@ function capture(command, args, cwd = root) {
 }
 let server;
 let recovered = false;
+let requests = 0;
 try {
   const source = path.join(root, 'fixture.mp4');
   assert.equal(await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=640x360:r=24', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '2', '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', source]), 0);
   const media = await readFile(source);
   server = createServer((req, res) => {
+    requests++;
     if (req.url === '/playlist.html') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end('<html><head><title>Fixture playlist</title></head><body><video src="/original-title.mp4"></video><video src="/recover.mp4"></video></body></html>');
@@ -116,6 +118,19 @@ try {
   const playlistResult = JSON.parse(playlist.stdout.trim());
   assert.equal(playlistResult.files.length, 1);
   assert.equal(path.basename(playlistResult.files[0]), 'Selected - 002.mp4');
+
+  // A finished download survives an unavailable destination, even without --resume.
+  const blockedDestination = path.join(root, 'blocked-output');
+  await writeFile(blockedDestination, 'destination unavailable');
+  const failedTransfer = await capture(process.execPath, [cli, url, '-o', blockedDestination, '--json']);
+  assert.equal(failedTransfer.code, 1, failedTransfer.stderr);
+  assert.match(failedTransfer.stderr, /Completed download kept locally/);
+  await rm(blockedDestination);
+  const beforeRetry = requests;
+  const transferRetry = await capture(process.execPath, [cli, url, '-o', blockedDestination, '--json']);
+  assert.equal(transferRetry.code, 0, transferRetry.stderr);
+  assert.equal(requests, beforeRetry, 'transfer retry must not contact the source again');
+  assert.equal((await stat(JSON.parse(transferRetry.stdout.trim()).files[0])).size, media.length);
   const files = await readdir(root);
   assert(files.includes('original-title.mp4'));
   assert(files.includes('original-title (1).mp4'));

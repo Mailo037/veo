@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { download, findFinishedMedia, formatSelector, isSidecar, isStagedMedia, listFormats, partialKey, planDownload, predictedExtension, previewPath, runBackend, selectQuality, stagedTitle, stagingTemplate } from '../src/downloader.js';
+import { download as actualDownload, localRequestKey, findFinishedMedia, formatSelector, isSidecar, isStagedMedia, listFormats, partialKey, planDownload, predictedExtension, previewPath, runBackend, selectQuality, stagedTitle, stagingTemplate } from '../src/downloader.js';
+
+const download = (options, dependencies = {}) => actualDownload(options, { localRoot: options.output, ...dependencies });
 
 const URL = 'https://example.com/video';
 
@@ -37,6 +39,17 @@ function recordingReporter() {
     finish: () => events.push(['finish']),
   };
 }
+
+test('wildcard rename saves the expanded title and reports it', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-rename-'));
+  try {
+    const reporter = recordingReporter();
+    const result = await download({ url: URL, output: directory, rename: 'movie_*', quality: 'best' }, { ...fakeBackend({ calls: [] }), reporter });
+    assert.equal(path.basename(result.files[0]), 'movie_A Title.mp4');
+    assert.equal(await readFile(result.files[0], 'utf8'), 'media-bytes');
+    assert.ok(reporter.events.some(([event, title]) => event === 'name' && title === 'movie_A Title'));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('format selectors express an exact height and fall back cleanly', () => {
   assert.equal(formatSelector(1080), 'bv[height=1080]+ba/b[height=1080]/bv[height=1080]');
@@ -160,7 +173,7 @@ test('a backend that produces no file fails loudly and leaves no staging data', 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('cancellation after the backend finished still cleans up the staging directory', async () => {
+test('cancellation after completion retains the local file for transfer retry', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-dl-'));
   try {
     const controller = new AbortController();
@@ -175,7 +188,10 @@ test('cancellation after the backend finished still cleans up the staging direct
       return '';
     };
     await assert.rejects(download({ url: URL, output: directory, quality: 'best' }, { backendResolver, runner, signal: controller.signal }), error => error.name === 'AbortError');
-    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.veo-') && name !== '.veo-history'), []);
+    const retained = (await readdir(directory)).filter(name => name.startsWith('.veo-part-'));
+    assert.equal(retained.length, 1);
+    const manifest = JSON.parse(await readFile(path.join(directory, retained[0], 'job.json'), 'utf8'));
+    assert.ok(manifest.expiresAt > Date.now());
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -234,7 +250,7 @@ test('--resume reuses one staging directory, continues, and keeps it on failure'
       },
     ), error => error.name === 'AbortError');
     const kept = (await readdir(directory)).filter(name => name.startsWith('.veo-part-'));
-    assert.deepEqual(kept, [`.veo-part-${partialKey({ id: 'vid123' }, URL, { quality: 'best' })}`]);
+    assert.deepEqual(kept, [`.veo-part-${localRequestKey({ url: URL, output: directory, quality: 'best' })}`]);
     // Resuming must ask the backend to continue, not to start over.
     assert.ok(calls[1].includes('--continue'));
     assert.ok(!calls[1].includes('--no-continue'));
@@ -242,7 +258,7 @@ test('--resume reuses one staging directory, continues, and keeps it on failure'
     // Second attempt finds the finished file and saves it without a new download.
     const second = fakeBackend({ calls: [] });
     const reporter = recordingReporter();
-    await writeFile(path.join(directory, `.veo-part-${partialKey({ id: 'vid123' }, URL, { quality: 'best' })}`, 'media.mp4.part'), 'half');
+    await writeFile(path.join(directory, `.veo-part-${localRequestKey({ url: URL, output: directory, quality: 'best' })}`, 'media.mp4.part'), 'half');
     const resumed = await download(
       { url: URL, output: directory, quality: 'best', resume: true },
       {
@@ -292,7 +308,7 @@ test('a symlinked staging path is refused instead of followed', async t => {
   try {
     const backendResolver = async () => ({ ytDlp: 'yt-dlp-fake', ffmpegLocation: 'tools' });
     const runner = async (executable, args) => (args.includes('--dump-single-json') ? JSON.stringify({ id: 'vid123', title: 't', formats: [] }) : '');
-    const link = path.join(directory, `.veo-part-${partialKey({ id: 'vid123' }, URL, { quality: 'best' })}`);
+    const link = path.join(directory, `.veo-part-${localRequestKey({ url: URL, output: directory, quality: 'best' })}`);
     // Whatever occupies the predictable path, it must be a real directory.
     await writeFile(link, 'not a directory');
     await assert.rejects(
@@ -398,6 +414,7 @@ test('only media extensions count as the downloaded file', () => {
   assert.equal(stagedTitle('C:/tmp/media-005.mp4', { title: 'List', entries: [] }), 'List - 005');
   assert.equal(stagedTitle('C:/tmp/media.mp4', { title: 'Solo' }), 'Solo');
   assert.equal(stagedTitle('C:/tmp/media.mp4', { title: 'Solo' }, 'My Name'), 'My Name');
+  assert.equal(stagedTitle('media.mp4', { title: '$& Film' }, 'movie_*_*'), 'movie_$& Film_$& Film');
   assert.equal(stagedTitle('C:/tmp/media-004.mp4', { title: 'List', entries: [{ title: 'One' }] }, 'My Name'), 'My Name - 004');
   assert.match(stagingTemplate('C:/tmp/x', false), /media\.%\(ext\)s$/);
 });

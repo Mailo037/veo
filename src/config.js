@@ -2,6 +2,7 @@ import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { configBase } from './paths.js';
+import { configSyntaxError } from './config-errors.js';
 import { CONFIG_TEMPLATE, stripConfigComments, withConfigTemplate } from './config-template.js';
 
 /**
@@ -62,10 +63,12 @@ export async function loadConfig({ env = process.env, file } = {}) {
     throw new Error(`Cannot read the veo config file ${target}: ${error.message}`);
   }
   let data;
+  let clean = text.replace(/^\uFEFF/, '');
   try {
-    data = JSON.parse(stripConfigComments(text));
-  } catch {
-    throw new Error(`The veo config file is not valid JSON: ${target}`);
+    clean = stripConfigComments(text);
+    data = JSON.parse(clean);
+  } catch (error) {
+    throw configSyntaxError(clean, target, error);
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`The veo config file must contain a JSON object: ${target}`);
@@ -104,7 +107,10 @@ export async function loadConfig({ env = process.env, file } = {}) {
 
 export function applyProfile(config, name) {
   const { profiles, ...defaults } = config;
-  if (!name) return defaults;
+  if (!name) {
+    if (!profiles || !Object.hasOwn(profiles, 'default')) return defaults;
+    name = 'default';
+  }
   if (!profiles || !Object.hasOwn(profiles, name)) throw new Error(`Unknown profile "${name}". Available: ${Object.keys(profiles || {}).join(', ') || 'none'}. Use veo config edit.`);
   return { ...defaults, ...profiles[name] };
 }
