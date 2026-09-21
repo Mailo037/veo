@@ -76,6 +76,7 @@ Commands:
   veo stop [id]            Stop one run, or every active run
   veo version              Show the installed version
   veo config edit|path|profiles|check|show|reset  Manage defaults and named profiles
+  veo config edit [--external|--terminal]      Choose the configuration editor
 
 Run veo without arguments in a terminal for interactive setup.
 

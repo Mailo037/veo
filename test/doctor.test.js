@@ -79,6 +79,24 @@ test('a healthy setup reports no problems', async () => {
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('Termux system yt-dlp is probed without pinned hashes and missing tools show pkg commands', async () => {
+  const dir = await deps({ platform: 'android', arch: 'arm64', hasEjs: async () => true });
+  try {
+    const report = { ...healthyBackend(dir.directory), asset: undefined,
+      ytDlp: { source: 'system', path: '/termux/bin/yt-dlp', present: true, verified: false } };
+    const checks = await collectChecks({ ...dir.options, inspect: async () => report });
+    assert.equal(summarize(checks).failed, 0);
+    assert.match(checks.find(check => check.label === 'yt-dlp').detail, /system installation, not pinned/);
+    report.ytDlp.present = false;
+    report.ffmpeg.present = false;
+    report.ffprobe.present = false;
+    const missing = await collectChecks({ ...dir.options, inspect: async () => report });
+    assert.equal(summarize(missing).failed, 3);
+    assert.match(missing.find(check => check.label === 'yt-dlp').detail, /pkg install python-yt-dlp/);
+    assert.ok(!missing.some(check => /bundled tools|downloaded on first/.test(check.detail)));
+  } finally { await rm(dir.directory, { recursive: true, force: true }); }
+});
+
 test('missing backend pieces and unusable tools fail the check', async () => {
   const missing = await deps();
   try {

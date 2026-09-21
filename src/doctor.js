@@ -2,11 +2,12 @@ import { commandOutput } from './output.js';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { inspectBackend, findOnPath, resolveBackend } from './backend.js';
+import { inspectBackend, findOnPath, resolveBackend, TERMUX_SETUP } from './backend.js';
 import { loadConfig } from './config.js';
 import { cacheBase } from './paths.js';
 import { fetchLatestVersion, compareVersions, packageVersion, defaultRegistry, veoCacheBase } from './updater.js';
 import { cleanText, readableError } from './utils.js';
+import { hasTermuxEjs } from './tool-setup.js';
 
 export const DOCTOR_HELP = `veo doctor - diagnose the local setup
 
@@ -25,6 +26,9 @@ downloads. Downloads no backend and changes nothing but its own probe files and
 the backend cache directory. The fix command restores managed tools (downloads
 yt-dlp if needed unless --offline), creates the requested output directory, and
 checks again. It does not change PATH, overrides or config values.
+Missing desktop media tools are downloaded into veo's cache automatically.
+On Android/Termux, fix installs missing tools with: ${TERMUX_SETUP} -y
+With --offline no tools are downloaded and no package manager is run.
 Exit status is 0 when no check fails, 1 otherwise.
 `;
 
@@ -116,6 +120,7 @@ export async function collectChecks({
   loadConfigImpl,
   fetchImpl = fetch,
   runProbe = probe,
+  hasEjs = hasTermuxEjs,
   registry = defaultRegistry(env),
   fetchLatest = fetchLatestVersion,
 } = {}) {
@@ -126,8 +131,8 @@ export async function collectChecks({
   push(major >= 22 ? 'ok' : 'fail', 'Node.js', `v${nodeVersion} (veo requires ${engines.replace(/^>=\s*/, 'Node.js ')}${major >= 22 ? '' : ' — please upgrade'})`);
 
   const report = await inspect().catch(error => ({ errors: [readableError(error)], ytDlp: {}, ffmpeg: {}, ffprobe: {} }));
-  const supported = Boolean(report.asset) || report.ytDlp?.source === 'override';
-  push(supported ? 'ok' : 'fail', 'Platform', `${platform}/${arch}${report.asset ? ` (yt-dlp ${report.asset})` : report.ytDlp?.source === 'override' ? ' (VEO_YT_DLP_PATH)' : ' — set VEO_YT_DLP_PATH to a trusted executable'}`);
+  const supported = platform === 'android' || Boolean(report.asset) || report.ytDlp?.source === 'override';
+  push(supported ? 'ok' : 'fail', 'Platform', `${platform}/${arch}${platform === 'android' ? ' (Termux system tools)' : report.asset ? ` (yt-dlp ${report.asset})` : report.ytDlp?.source === 'override' ? ' (VEO_YT_DLP_PATH)' : ' — set VEO_YT_DLP_PATH to a trusted executable'}`);
 
   for (const message of report.errors || []) push('fail', 'Environment', message);
 
@@ -141,10 +146,10 @@ export async function collectChecks({
   push(cacheAccess.ok ? 'ok' : 'fail', 'Backend cache', `${report.directory || veoCacheBase({ platform, env })}${cacheAccess.ok ? '' : ` — ${cacheAccess.reason}`}`);
 
   const yt = report.ytDlp || {};
-  if (yt.present && yt.source !== 'override' && !yt.verified) {
+  if (yt.present && !['override', 'system'].includes(yt.source) && !yt.verified) {
     push('fail', 'yt-dlp', `${yt.path} — SHA-256 verification failed; run veo doctor fix`);
   } else if (yt.present) {
-    let detail = `${yt.path} (${yt.source === 'override' ? 'VEO_YT_DLP_PATH' : `release ${report.release}${yt.verified ? ', SHA-256 verified' : ''}`})`;
+    let detail = `${yt.path} (${yt.source === 'override' ? 'VEO_YT_DLP_PATH' : yt.source === 'system' ? 'system installation, not pinned by veo' : `release ${report.release}${yt.verified ? ', SHA-256 verified' : ''}`})`;
     try {
       const out = await runProbe(yt.path, ['--version']);
       const probed = findProbeVersion(out);
@@ -153,14 +158,21 @@ export async function collectChecks({
     } catch (error) {
       push('fail', 'yt-dlp', `${detail} — could not run it: ${readableError(error)}`);
     }
+  } else if (platform === 'android') {
+    push('fail', 'yt-dlp', `not found — run veo doctor fix to install automatically (Termux: ${TERMUX_SETUP})`);
   } else if (supported) {
     push('warn', 'yt-dlp', `not cached yet; downloaded on first download (release ${report.release ?? 'unknown'})`);
+  }
+
+  if (platform === 'android' && yt.source !== 'override') {
+    const ejs = await hasEjs({ find, run: runProbe });
+    push(ejs ? 'ok' : 'fail', 'YouTube JS', ejs ? 'yt-dlp-ejs installed; veo uses Node.js' : 'yt-dlp-ejs missing — run veo doctor fix to install automatically');
   }
 
   for (const name of ['ffmpeg', 'ffprobe']) {
     const tool = report[name] || {};
     if (!tool.present) {
-      push('fail', name, `not found — install FFmpeg or set VEO_FFMPEG_PATH to a directory containing ffmpeg and ffprobe`);
+      push('fail', name, 'not found — run veo doctor fix to install automatically, or set VEO_FFMPEG_PATH to a directory containing ffmpeg and ffprobe');
       continue;
     }
     const source = tool.source === 'override' ? 'VEO_FFMPEG_PATH' : tool.source === 'cache' ? 'managed cache' : 'system installation';
@@ -177,7 +189,7 @@ export async function collectChecks({
   const systemFfprobe = await find(['ffprobe']);
   const mediaReady = ['ffmpeg', 'ffprobe'].every(name => checks.some(check => check.label === name && check.level === 'ok'));
   push(systemFfmpeg && systemFfprobe || mediaReady ? 'ok' : 'warn', 'System FFmpeg',
-    systemFfmpeg && systemFfprobe ? `${path.dirname(systemFfmpeg)} (fallback)` : mediaReady ? 'not required — the selected FFmpeg and FFprobe work' : 'not on PATH — run veo doctor fix to prepare the bundled tools');
+    systemFfmpeg && systemFfprobe ? `${path.dirname(systemFfmpeg)} (fallback)` : mediaReady ? 'not required — the selected FFmpeg and FFprobe work' : platform === 'android' ? 'not on PATH — in Termux run: pkg install ffmpeg' : 'not on PATH — run veo doctor fix to prepare the bundled tools');
 
   const partials = await readdir(target, { withFileTypes: true }).catch(() => []);
   const leftover = partials.filter(entry => entry.isDirectory() && entry.name.startsWith('.veo-') && entry.name !== '.veo-history').map(entry => entry.name);
@@ -250,7 +262,7 @@ export async function doctorMain(args = [], {
     stdout.write('Repairing local setup…\n');
     try {
       await (deps.repairBackend || resolveBackend)({ offline, onStatus: message => stdout.write(`${cleanText(message)}\n`) });
-      stdout.write('Managed tools are ready.\n');
+      stdout.write('Backend tools are ready.\n');
     } catch (error) {
       repairs.push({ level: 'fail', label: 'Repair tools', detail: readableError(error) });
     }

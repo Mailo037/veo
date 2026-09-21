@@ -118,6 +118,10 @@ export async function backendUpdateMain(args = [], {
   if (command === 'reset') {
     const unknown = rest.filter(token => token !== '--keep-files');
     if (unknown.length) throw new Error(`Unknown option for veo backend reset: ${unknown.join(' ')}. Use: veo backend reset [--keep-files]`);
+    if (platform === 'android') {
+      stdout.write('Android/Termux uses system yt-dlp or VEO_YT_DLP_PATH. There is no managed backend to reset.\n');
+      return 0;
+    }
     const state = await readBackendOverride(stateFile);
     if (!await reset(stateFile)) {
       stdout.write(`No installed backend to remove. veo uses the pinned release ${RELEASE}.\n`);
@@ -134,6 +138,10 @@ export async function backendUpdateMain(args = [], {
   const checkOnly = rest.includes('--check');
   const unknown = rest.filter(token => token !== '--check');
   if (unknown.length) throw new Error(`Unknown option for veo backend update: ${unknown.join(' ')}. Use: veo backend update [--check]`);
+  if (platform === 'android') {
+    stdout.write('Android/Termux uses system yt-dlp or VEO_YT_DLP_PATH, not a pinned release. Update the Termux package with: pkg upgrade python-yt-dlp yt-dlp-ejs\n');
+    return 0;
+  }
   if (env.VEO_YT_DLP_PATH) stderr.write('veo: VEO_YT_DLP_PATH is set and always takes precedence over the managed backend.\n');
 
   let info;

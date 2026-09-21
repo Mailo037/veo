@@ -21,6 +21,12 @@ npm install -g @mailo037/veo
 veo "https://example.com/video.mp4"
 ```
 
+The first download automatically prepares missing yt-dlp, FFmpeg and FFprobe.
+On Android/Termux this includes installing the native packages and yt-dlp's
+JavaScript support with `pkg install -y`. On desktop systems, missing media tools
+are downloaded into veo's own cache. Run `veo doctor fix` to prepare everything
+before downloading. Plain `veo doctor`, help and version do not install tools.
+
 From this checkout, without publishing:
 
 ```bash
@@ -360,9 +366,34 @@ preserving existing settings. An empty profile does not change download behavior
 CLI flags. `veo config profiles` lists profile names; `veo config path` prints the file path.
 `veo config edit` fills new or empty files with a commented template explaining common
 options and example profiles. Existing files receive a commented reference guide once;
-their settings remain intact. It opens the file in `VISUAL` or `EDITOR`
-(an executable path, without shell arguments), falling back to Notepad on Windows or `vi`
-elsewhere. Existing configuration is preserved. The wizard also offers configured profiles.
+their settings remain intact. In an interactive terminal, it opens the built-in editor
+unless `VISUAL` or `EDITOR` is configured (an executable path, without shell arguments).
+The editor provides syntax colors, line numbers and live validation. Syntax errors mark
+the affected line; unknown properties and invalid values are highlighted directly, with
+spelling suggestions, expected types and allowed values in the status area. Validation uses
+the same rules as the CLI, including profile overrides and audio/video formats.
+Press F2 on a property or value to open suggestions, use Up/Down to choose, Enter to apply
+or Esc to cancel. Suggestions require valid JSON syntax; free-text values and custom numeric
+resolutions such as `900p` remain supported. Ctrl+S validates and saves;
+Esc or Ctrl+Q exits, asking before discarding changes. Use arrows, Home/End and PageUp/PageDown
+to navigate. Invalid configurations cannot be saved. `--no-color` disables syntax colors.
+In terminals supporting SGR mouse reporting, left-click positions the cursor and dragging
+selects text, including across lines. Backspace/Delete removes the selection; typing replaces
+it. The editor disables mouse reporting again when it exits. Keyboard editing remains available
+in terminals without mouse support.
+
+Use `veo config edit --external` to use `VISUAL`, then `EDITOR`, then Notepad on Windows
+or `vi` elsewhere. `veo config edit --terminal` explicitly selects the built-in editor.
+Set `VEO_CONFIG_EDITOR=external` to disable the built-in editor by default (`auto` restores
+automatic selection, `terminal` forces it). For a persistent Windows preference:
+
+```powershell
+[Environment]::SetEnvironmentVariable('VEO_CONFIG_EDITOR', 'external', 'User')
+$env:VEO_CONFIG_EDITOR = 'external'
+```
+
+Non-interactive sessions use the external editor unless `--terminal` is explicitly selected,
+in which case an interactive-terminal error is reported. The wizard also offers configured profiles.
 Generated templates and app messages are in English. Previously generated German template
 comments are translated the next time you run `veo config edit`; existing profile names,
 paths and custom comments are preserved.
@@ -505,8 +536,10 @@ only creates its own probe files plus the backend cache directory. Exit status i
 at least one check fails.
 
 Run `veo doctor fix` to restore missing or damaged managed tools and check again.
-It stages bundled FFmpeg/FFprobe and downloads verified yt-dlp when needed. With
-`--offline`, it only uses local binaries; missing yt-dlp is reported for an online retry.
+It stages bundled FFmpeg/FFprobe and downloads verified yt-dlp when needed. Missing
+desktop media tools are installed in veo's cache using npm and the pinned media
+packages. On Termux it installs missing native tools with the package manager.
+With `--offline`, it only uses local binaries; missing tools are reported for an online retry.
 Use `-o PATH` to create and check an output directory. Config errors and invalid overrides
 are reported for manual correction; PATH and config values are never rewritten.
 A missing system FFmpeg is not a warning when the selected media tools work.
@@ -515,15 +548,59 @@ A missing system FFmpeg is not a warning when the selected media tools work.
 
 YouTube, X/Twitter, TikTok, Vimeo, Reddit, Instagram, and [many other yt-dlp sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) are supported **when publicly accessible and technically available**. Support changes with websites, regions, rate limits, and backend versions; it is not a guarantee that every URL will work.
 
-Official standalone yt-dlp is acquired on first download and cached outside the package directory; help, version and plain doctor never download the backend. The release is pinned and SHA-256 verified against hashes shipped with this package. FFmpeg and FFprobe are supplied by the `ffmpeg-static` and `ffprobe-static` dependencies during npm installation. These binaries have their own licenses; see their upstream packages. Normal installs must allow dependency install scripts. No Python installation is needed on supported standalone platforms.
+Official standalone yt-dlp is acquired on first download and cached outside the package directory; help, version and plain doctor never download the backend. The release is pinned and SHA-256 verified against hashes shipped with this package. FFmpeg and FFprobe are normally supplied by the optional `ffmpeg-static` and `ffprobe-static` dependencies during npm installation. If these are absent and no local pair is available, veo installs `ffmpeg-static@5.3.0` and a platform-specific `@ffprobe-installer` package in a temporary cache project, checks that both programs run, and saves them in its backend cache. Media packages use npm/upstream HTTPS distribution, not the yt-dlp pinned-hash guarantee. These binaries have their own licenses; see their upstream packages. No Python installation is needed on supported standalone platforms.
 
 The existing Node executable is explicitly enabled as yt-dlp's JavaScript runtime for YouTube. Local yt-dlp configuration and plugins are disabled for predictable execution. Arguments are passed without a shell.
 
 `ffmpeg-static` and `ffprobe-static` publish no Windows ARM64 binaries. veo no longer refuses
-that platform: it falls back to an FFmpeg/FFprobe pair found on `PATH`, including the usual
-WinGet, Chocolatey and `C:\ffmpeg\bin` locations.
+that platform: it uses an FFmpeg/FFprobe pair found on `PATH`, including the usual
+WinGet, Chocolatey and `C:\ffmpeg\bin` locations, or automatically downloads x64
+media tools for Windows 11's x64 emulation.
 
-Advanced overrides:
+### Android / Termux
+
+With Node.js 22+ and npm already installed in Termux:
+
+```sh
+npm install -g @mailo037/veo
+veo "URL"
+```
+
+On Android, veo automatically finds `yt-dlp`, `ffmpeg` and `ffprobe` on PATH
+(also checking `$PREFIX/bin`). If tools or the `yt-dlp-ejs` Python module are
+missing, it runs `pkg install -y python-yt-dlp yt-dlp-ejs ffmpeg` automatically,
+then checks the installed programs before continuing the download. Python is
+installed as a dependency. Termux with the pacman package manager uses
+`--noconfirm` instead. This needs a working Termux repository and internet access.
+No root access is needed. Later runs reuse the installed tools.
+
+Static FFmpeg dependencies are optional; `--omit=optional` can be added to the
+npm install command to skip attempting those desktop packages entirely.
+The system yt-dlp is maintained by Termux and is
+not pinned or hash-verified by veo. Explicit `VEO_YT_DLP_PATH` and
+`VEO_FFMPEG_PATH` overrides still take precedence.
+
+`veo doctor fix` also performs this automatic setup; `veo doctor fix --offline`
+never invokes a package manager. Update Termux packages with `pkg upgrade`;
+`veo backend update` prints this platform's update instructions.
+
+To save files in Android's shared Downloads folder, run `termux-setup-storage`,
+grant the storage permission, then use `veo "URL" -o ~/storage/downloads`.
+Keep veo and its tools in Termux's private storage.
+
+For existing published veo 1.6.1 installations (before this automatic setup), run:
+
+```sh
+pkg install python-yt-dlp yt-dlp-ejs ffmpeg
+export VEO_YT_DLP_PATH="$(command -v yt-dlp)"
+export VEO_FFMPEG_PATH="$PREFIX/bin"
+veo doctor
+```
+
+These exports apply to the current shell; add them to your shell startup file
+if you need them on subsequent launches of 1.6.1.
+
+### Advanced overrides
 
 - `VEO_YT_DLP_PATH`: absolute path to a trusted, current yt-dlp executable. It always takes
   precedence over the managed backend, including one installed by `veo backend update`.
@@ -531,10 +608,13 @@ Advanced overrides:
   `.exe` on Windows).
 - `VEO_CONFIG`: path to the config file.
 
-Automatic yt-dlp acquisition covers mainstream Windows, macOS and Linux architectures.
-Unsupported systems should supply trusted native binaries. A blocked GitHub request, proxy,
-disabled install scripts, or unsupported native binary can prevent setup; errors include
-guidance. Maintainers should update the pinned yt-dlp release and hashes as websites change,
+Automatic setup covers Windows x64/ia32/ARM64, macOS x64/ARM64, Linux x64/ARM64,
+and Android through Termux. Windows ARM64 media tools require x64 emulation.
+Other systems should supply trusted native binaries. Node.js 22+, npm, internet
+access, executable private storage and working OS libraries are prerequisites;
+network blocks or unavailable repositories can still prevent setup. Android's
+shared-storage permission must be granted by the user. Maintainers should update
+the pinned yt-dlp release and hashes as websites change,
 or users can install a newer release themselves.
 
 ### Installing a newer backend

@@ -2,6 +2,17 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.7.0
+
+### Added
+
+- Android/Termux automatically uses system yt-dlp and FFmpeg, with platform-specific doctor and backend-update instructions.
+- First downloads and `veo doctor fix` automatically install missing Termux tools (including JavaScript support) or acquire missing desktop media binaries in veo's cache; offline mode never installs packages.
+
+### Changed
+
+- Static desktop media tools are optional dependencies so unsupported binaries do not prevent npm installation.
+
 ## 1.6.1
 
 ### Added

@@ -21,6 +21,16 @@ function io() {
   };
 }
 
+test('Android backend commands explain system ownership without network or reset', async () => {
+  for (const args of [['update'], ['update', '--check'], ['reset']]) {
+    const streams = io();
+    const unexpected = async () => { throw new Error('unexpected managed backend operation'); };
+    assert.equal(await backendUpdateMain(args, { ...streams, platform: 'android', check: unexpected, reset: unexpected, install: unexpected }), 0);
+    assert.match(streams.out, /Android\/Termux uses system yt-dlp/);
+    if (args[0] === 'update') assert.match(streams.out, /pkg upgrade python-yt-dlp/);
+  }
+});
+
 function response(body, { ok = true, status = 200, json = false } = {}) {
   return {
     ok,

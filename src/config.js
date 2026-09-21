@@ -73,6 +73,10 @@ export async function loadConfig({ env = process.env, file } = {}) {
     if (error.code === 'ENOENT') return { file: target, exists: false, config: {}, warnings: [] };
     throw new Error(`Cannot read the veo config file ${target}: ${error.message}`);
   }
+  return parseConfigText(text, target);
+}
+
+export function parseConfigText(text, target = 'config') {
   let data;
   let clean = text.replace(/^\uFEFF/, '');
   try {
@@ -138,6 +142,7 @@ export async function prepareConfigEdit(file) {
 }
 
 export async function configMain(args) {
+  const editorColor = !args.includes('--no-color') && !Object.hasOwn(process.env, 'NO_COLOR');
   let stdout;
   [args, stdout] = commandOutput(args, process.stdout);
   if (args[0] === 'show') stdout = process.stdout;
@@ -165,7 +170,12 @@ export async function configMain(args) {
     }
     return 0;
   }
-  if (args.length !== 1 || !['edit', 'path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles|check|show|reset');
+  let editorMode;
+  if (args[0] === 'edit') {
+    if (args.length > 2 || (args[1] && !['--external', '--terminal'].includes(args[1]))) throw new Error('Usage: veo config edit [--external|--terminal]');
+    editorMode = args[1]?.slice(2) || process.env.VEO_CONFIG_EDITOR || 'auto';
+    if (!['auto', 'external', 'terminal'].includes(editorMode)) throw new Error('VEO_CONFIG_EDITOR must be auto, external or terminal.');
+  } else if (args.length !== 1 || !['path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles|check|show|reset');
   if (args[0] === 'path') { stdout.write(`${file}\n`); return 0; }
   if (args[0] === 'profiles') {
     const loaded = await loadConfig();
@@ -173,6 +183,11 @@ export async function configMain(args) {
     return 0;
   }
   await prepareConfigEdit(file);
+  if (editorMode === 'terminal' || (editorMode === 'auto' && !process.env.VISUAL && !process.env.EDITOR && process.stdin.isTTY && process.stdout.isTTY)) {
+    const { editConfig } = await import('./config-editor.js');
+    await editConfig(file, { color: editorColor });
+    return 0;
+  }
   // Treat the editor as an executable path, never as shell code.
   const editor = process.env.VISUAL || process.env.EDITOR || (process.platform === 'win32' ? 'notepad.exe' : 'vi');
   await new Promise((resolve, reject) => {
