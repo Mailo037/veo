@@ -58,7 +58,11 @@ export function runBackend(executable, args, { signal, onLine } = {}) {
       errorLines.close();
       if (failure) reject(failure);
       else if (signal?.aborted) reject(new DOMException('Cancelled', 'AbortError'));
-      else if (code !== 0) reject(new Error(errors || `Downloading backend exited with code ${code}.`));
+      else if (code !== 0) {
+        const diagnostics = errors.split(/\r?\n/).filter(line => !/^veo-(?:progress|postprocess):/.test(line));
+        const failureLine = diagnostics.filter(line => /^ERROR:/i.test(line)).at(-1);
+        reject(new Error(failureLine || diagnostics.join('\n') || `Downloading backend exited with code ${code}.`));
+      }
       else resolve(output);
     });
   });
@@ -395,7 +399,8 @@ export async function download(options, { signal, reporter, backendResolver = re
   const existingStage = await lstat(stagingPath).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existingStage && (!existingStage.isDirectory() || existingStage.isSymbolicLink())) throw new Error(`The partial download path is not a plain directory: ${stagingPath}`);
   const cached = await readJson(path.join(stagingPath, 'job.json'), null);
-  const readyToTransfer = cached?.requestKey === requestKey && cached.ready?.length && cached.metadata;
+  const readyToTransfer = cached?.requestKey === requestKey && cached.ready?.length && cached.metadata
+    && (cached.backendSucceeded === true || cached.compatibilityChecked === true || cached.files?.length);
   const backend = readyToTransfer ? null : await prepareBackend(options, { signal, backendResolver, reporter });
   timer.switch('metadata');
   const metadata = readyToTransfer ? cached.metadata : await adaptiveRun(() => fetchMetadata(options, { signal, backend, runner, reporter }), { enabled: options.adaptiveConcurrency !== false, state: adaptiveState, signal, reporter, wait, timer });
@@ -426,6 +431,7 @@ export async function download(options, { signal, reporter, backendResolver = re
   }
   const manifestFile = path.join(staging, 'job.json');
   let keepPartial = false;
+  let unconfirmedOutput = Boolean(!readyToTransfer && (cached?.ready?.length || cached?.unconfirmedOutput));
   let manifest;
   let releaseSpace = () => {};
   try {
@@ -442,17 +448,24 @@ export async function download(options, { signal, reporter, backendResolver = re
     }
     delete manifest.expiresAt;
     await writeJson(manifestFile, manifest);
-    // Only an after_move event proves that all postprocessing completed.
-    let staged = [...new Set(manifest.ready)];
+    // after_move can still be emitted by yt-dlp after a media stream failed.
+    // A successful process exit must confirm candidates before transfer/reuse.
+    let staged = readyToTransfer ? [...new Set(manifest.ready)] : [];
     if (!staged.length) {
+      const unconfirmed = manifest.backendSucceeded === false || manifest.ready.length > 0;
+      manifest.ready = [];
+      manifest.backendSucceeded = false;
+      await writeJson(manifestFile, manifest);
       reporter?.status(options.audio ? 'Downloading audio…' : 'Downloading…');
       timer.switch('download');
-      let writes = Promise.resolve();
-      try {
         await adaptiveRun(async attempt => {
+          const candidates = [];
           const attemptOptions = { ...options, resume: options.resume || attempt > 0, concurrentFragments: reducedLimit(options.concurrentFragments ?? 8, adaptiveState) };
           const args = [...backendArgs(attemptOptions, backend), ...mediaArgs(attemptOptions, quality), '-o', stagingTemplate(staging, false), '--', options.url];
-          return runner(backend.ytDlp, args, { signal, onLine(line) {
+          // A failed process may have left a final filename: --no-overwrites
+          // would otherwise silently accept that unconfirmed file on retry.
+          if (unconfirmed || attempt > 0) args.splice(args.indexOf('--'), 0, '--force-overwrites');
+          await runner(backend.ytDlp, args, { signal, onLine(line) {
             if (line.startsWith('veo-progress:')) {
               if (timer.phase !== 'download') timer.switch('download');
               const data = JSON.parse(line.slice('veo-progress:'.length));
@@ -465,14 +478,17 @@ export async function download(options, { signal, reporter, backendResolver = re
             if (line.startsWith('veo-file:')) {
               const file = JSON.parse(line.slice('veo-file:'.length));
               if (path.dirname(path.resolve(file)) !== staging || !isStagedMedia(path.basename(file))) throw new Error('The backend returned an invalid saved file path.');
-              staged.push(file);
-              manifest.ready.push(file);
-              writes = writes.then(() => writeJson(manifestFile, manifest));
-              writes.catch(() => {});
+              candidates.push(file);
+              unconfirmedOutput = true;
             }
           } });
+          staged = [...new Set(candidates)];
         }, { enabled: options.adaptiveConcurrency !== false, state: adaptiveState, signal, reporter, wait, timer });
-      } finally { await writes; }
+      manifest.ready = staged;
+      manifest.backendSucceeded = true;
+      delete manifest.unconfirmedOutput;
+      unconfirmedOutput = false;
+      await writeJson(manifestFile, manifest);
     }
     // Cancellation must win over any follow-up error so the caller can report
     // "Cancelled." instead of a confusing backend message.
@@ -511,8 +527,9 @@ export async function download(options, { signal, reporter, backendResolver = re
   } catch (error) {
     // A kept staging directory is the whole point of --resume, and cancellation
     // is the most common reason to want one.
-    keepPartial = Boolean(options.resume || manifest?.ready?.length);
-    if (manifest?.ready?.length) {
+    keepPartial = Boolean(options.resume || manifest?.ready?.length || unconfirmedOutput);
+    if (manifest && unconfirmedOutput) manifest.unconfirmedOutput = true;
+    if (manifest?.ready?.length || (unconfirmedOutput && !options.resume)) {
       manifest.expiresAt = Date.now() + TRANSFER_RETENTION_MS;
       await writeJson(manifestFile, manifest);
     }
@@ -522,7 +539,9 @@ export async function download(options, { signal, reporter, backendResolver = re
     await lock.close();
     await rm(lockPath, { force: true });
     reporter?.finish();
-    if (keepPartial) reporter?.status(manifest?.expiresAt
+    if (keepPartial) reporter?.status(manifest?.expiresAt && !manifest?.ready?.length
+      ? `Unconfirmed download kept locally in ${staging} for 15 minutes. Retry will rerun the backend; incomplete media may need to be downloaded again.`
+      : manifest?.expiresAt
       ? `Completed download kept locally in ${staging}. Retry within 15 minutes to transfer without downloading again. Expired files are cleaned on the next veo run.`
       : `Partial download kept locally in ${staging}. Re-run with --resume to continue it.`);
     else await rm(staging, { recursive: true, force: true });

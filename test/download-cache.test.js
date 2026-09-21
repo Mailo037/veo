@@ -7,6 +7,40 @@ import { cleanupDownloadCache, TRANSFER_RETENTION_MS } from '../src/download-cac
 import { download, localRequestKey } from '../src/downloader.js';
 import { allocate } from '../src/utils.js';
 
+test('after_move followed by a backend error never marks media complete or skips the backend on retry', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'veo-unconfirmed-'));
+  const localRoot = path.join(root, 'cache');
+  const options = { url: 'https://example.test/empty-stream', quality: 'best', output: path.join(root, 'output'), checkSpace: false };
+  let attempts = 0;
+  const messages = [];
+  const dependencies = { localRoot, backendResolver: async () => ({ ytDlp: 'fake', ffmpegLocation: 'fake' }),
+    reporter: { status: message => messages.push(message), finish() {} },
+    runner: async (_, args, { onLine } = {}) => {
+      if (args.includes('--dump-single-json')) return JSON.stringify({ id: 'empty', title: 'Video' });
+      attempts++;
+      const file = path.join(path.dirname(args[args.indexOf('-o') + 1]), 'media.mp4');
+      await writeFile(file, attempts === 1 ? 'unconfirmed media' : 'complete media');
+      onLine(`veo-file:${JSON.stringify(file)}`);
+      if (attempts === 1) throw new Error('ERROR: Did not get any data blocks');
+      assert.ok(args.includes('--force-overwrites'));
+    },
+  };
+  try {
+    await assert.rejects(download(options, dependencies), /Did not get any data blocks/);
+    const staging = path.join(localRoot, `.veo-part-${localRequestKey(options)}`);
+    const manifest = JSON.parse(await readFile(path.join(staging, 'job.json'), 'utf8'));
+    assert.deepEqual(manifest.ready, []);
+    assert.equal(manifest.backendSucceeded, false);
+    assert.ok(manifest.expiresAt > Date.now());
+    assert.equal(await readFile(path.join(staging, 'media.mp4'), 'utf8'), 'unconfirmed media');
+    assert.ok(messages.some(message => message.startsWith('Unconfirmed download')));
+    assert.ok(!messages.some(message => message.startsWith('Completed download')));
+    const result = await download(options, dependencies);
+    assert.equal(attempts, 2);
+    assert.equal(await readFile(result.files[0], 'utf8'), 'complete media');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('a failed transfer keeps the completed local file and retries without any backend access', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'veo-local-transfer-'));
   const localRoot = path.join(root, 'local-cache'), output = path.join(root, 'destination');

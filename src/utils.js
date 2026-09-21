@@ -187,13 +187,22 @@ export function readableError(error) {
   if (error.code === 'EACCES' || error.code === 'EPERM') return 'Permission denied. Choose a writable output directory or check executable permissions.';
   if (error.code === 'ENOSPC') return 'Not enough disk space to save the download.';
   const text = cleanText(error.message || error);
+  if (/did not get any data blocks/i.test(text)) return 'The media stream returned no data (yt-dlp: Did not get any data blocks). The download is not confirmed complete. Retry the download; if it persists, update the backend with veo backend update.';
   if (/unsupported url|no suitable extractor/i.test(text)) return 'This URL or website is not supported by the downloading backend.';
   if (/private|login required|sign in|log in|authentication|members.only|not a bot|cookies/i.test(text)) return 'This content is private or requires authentication. veo does not bypass access controls. If you are authorized to view it, pass your own session with --cookies <file> or --cookies-from-browser <browser>.';
   if (/deleted|removed|no longer available|404|not found|does not exist/i.test(text)) return 'The content was deleted, removed, or could not be found.';
   if (/could not write header|only vp8 or vp9 or av1|not supported in container|could not find tag/i.test(text)) return 'The selected codecs do not fit this container. Try --format mkv for lossless output, or add --recode to explicitly convert (may lose quality).';
   if (/requested format|no video formats|no suitable formats|conversion failed|error opening encoder|could not find tag/i.test(text)) return 'The requested format is unavailable or could not be converted. Try -q best or another --format.';
   if (/drm.protected|digital rights/i.test(text)) return 'This content is DRM-protected. veo does not remove DRM.';
-  if (/network|timed? ?out|connection|resolve|ENOTFOUND|ECONN|fetch failed|HTTP Error (403|429|5\d\d)/i.test(text)) return 'Network request failed or the site blocked the request. Check your connection and URL, then try again later.';
+  const http = text.match(/HTTP(?: Error)?\s*:?\s*(403|429|5\d\d)\b/i)?.[1];
+  if (http === '403') return 'HTTP 403 Forbidden: the server refused the media download. The video page may still be accessible. Try veo backend update and retry.';
+  if (http === '429') return 'HTTP 429 Too Many Requests: the server is rate-limiting downloads. Wait before retrying.';
+  if (http) return `HTTP ${http}: the server failed to handle the download. Try again later.`;
+  if (/network|timed? ?out|connection|resolve|ENOTFOUND|ECONN|fetch failed/i.test(text)) {
+    const detail = text.match(/\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT)\b/i)?.[0]
+      || (/timed? ?out/i.test(text) ? 'request timed out' : /connection reset/i.test(text) ? 'connection reset' : 'connection failed');
+    return `Network request failed (${detail}). Check your connection and try again later.`;
+  }
   if (/not available|unavailable|geo.?restrict|country/i.test(text)) return 'This content is unavailable or restricted in your region.';
   return text.slice(-1200) || 'Download failed. Please try again.';
 }

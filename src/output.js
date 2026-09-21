@@ -46,6 +46,7 @@ export function outputStream(stream, { enabled = settings.getStore()?.enabled !=
   if (plain || !enabled || !stream.isTTY) return stream;
   return {
     isTTY: stream.isTTY,
+    get columns() { return stream.columns; },
     write(chunk, ...args) {
       if (typeof chunk !== 'string') return stream.write(chunk, ...args);
       return stream.write(formatOutput(chunk, stream, enabled), ...args);

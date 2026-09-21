@@ -17,13 +17,43 @@ function bytes(value) {
   return `${value.toFixed(i ? 1 : 0)} ${units[i]}`;
 }
 
-export function formatProgress(data) {
+// Count terminal cells conservatively, including wide titles and emoji.
+function cells(text) {
+  return [...text].reduce((width, char) => width + (/\p{Mark}|\u200d/u.test(char) ? 0 : /[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6]|\p{Extended_Pictographic}/u.test(char) ? 2 : 1), 0);
+}
+
+function fit(text, width) {
+  if (cells(text) <= width) return text;
+  let result = '';
+  for (const char of text) {
+    if (cells(result + char) > width - 1) break;
+    result += char;
+  }
+  return width > 0 ? result + '…' : '';
+}
+
+export function formatProgress(data, { columns = Infinity, prefix = '' } = {}) {
   const done = Number.isFinite(data.downloaded_bytes) ? data.downloaded_bytes : 0;
   const total = data.total_bytes || data.total_bytes_estimate;
-  const percent = total > 0 ? Math.min(100, done / total * 100) : null;
+  const estimated = !data.total_bytes && Boolean(data.total_bytes_estimate);
+  const percent = total > 0 ? Math.max(0, Math.min(estimated && data.status !== 'finished' ? 99 : 100, done / total * 100)) : null;
   const filled = percent === null ? 0 : Math.round(percent / 5);
   const eta = Number.isFinite(data.eta) ? `${Math.floor(data.eta / 60)}:${String(Math.floor(data.eta % 60)).padStart(2, '0')}` : '?';
-  return `[${'='.repeat(filled)}${'-'.repeat(20 - filled)}] ${percent === null ? '  ?' : percent.toFixed(0).padStart(3)}%  ${bytes(data.speed)}/s  ${bytes(done)} / ${bytes(total)}  ETA ${eta}`;
+  const pct = `${estimated && data.status !== 'finished' ? '~' : ''}${percent === null ? '?' : percent.toFixed(0)}%`;
+  const size = `${estimated ? '~' : ''}${bytes(total)}`;
+  const compact = value => bytes(value).replace(' ', '');
+  const label = prefix ? fit(cleanText(prefix), Math.max(0, Math.floor(columns / 3))) + ' ' : '';
+  const variants = data.status === 'finished'
+    ? [`${bytes(done)} received; processing…`, `${compact(done)} received`, 'Received']
+    : [
+      `[${'='.repeat(filled)}${'-'.repeat(20 - filled)}] ${pct.padStart(4)}  ${bytes(data.speed)}/s  ${bytes(done)} / ${size}  ETA ${eta}`,
+      `${pct} ${compact(data.speed)}/s ${compact(done)}/${estimated ? '~' : ''}${compact(total)} ETA ${eta}`,
+      `${pct} ${compact(data.speed)}/s ETA ${eta}`,
+      `${pct} ${compact(done)}`,
+      pct,
+    ];
+  for (const variant of variants) if (cells(label + variant) <= columns) return label + variant;
+  return fit(variants.at(-1), columns);
 }
 
 export function createReporter(stream = process.stderr, { setTitle = createTerminalTitle(stream) } = {}) {
@@ -38,6 +68,8 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
   let position = '';
   let hasItem = false;
   let streamName = '';
+  const line = (data, prefix) => formatProgress(data, { prefix, columns: stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity });
+  const draw = (data, prefix) => { stream.write(`\r\x1b[2K${line(data, prefix)}`); active = true; };
   const updateTitle = () => setTitle(`veo | ${phase}${name ? ` | ${name}` : ''}`);
   function clear() {
     if (active && stream.isTTY) stream.write('\r\x1b[2K');
@@ -58,7 +90,9 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
       name(value) { childName = cleanText(value); },
       status: log,
       progress(data) {
-        if (Date.now() - lastProgress >= 5000 || data.status === 'finished') {
+        if (stream.isTTY) {
+          draw(data, prefix + childName + ': ' + (data.stream || 'Media'));
+        } else if (Date.now() - lastProgress >= 5000 || data.status === 'finished') {
           log((data.stream || 'Media') + ' ' + formatProgress(data), false);
           lastProgress = Date.now();
         }
@@ -101,14 +135,13 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
         clear(); streamName = data.stream; lastLog = 0;
         stream.write(muted(`${position}${streamName} download`) + '\n');
       }
-      const total = data.total_bytes || data.total_bytes_estimate;
+      const total = data.total_bytes;
       const percent = Number.isFinite(total) && total > 0 && Number.isFinite(data.downloaded_bytes)
         ? Math.max(0, Math.min(100, Math.round(data.downloaded_bytes / total * 100))) : null;
       phase = data.status === 'finished' ? 'Processing…' : percent === null ? 'Downloading…' : `${percent}%`;
       if (started) updateTitle();
       if (stream.isTTY) {
-        stream.write(`\r\x1b[2K${position}${streamName ? `${streamName} ` : ''}${formatProgress(data)}`);
-        active = true;
+        draw(data, `${position}${streamName}`);
       } else if (Date.now() - lastLog >= 5000 || data.status === 'finished') {
         stream.write(`${position}${streamName ? `${streamName} ` : ''}${formatProgress(data)}\n`);
         lastLog = Date.now();

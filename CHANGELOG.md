@@ -2,6 +2,14 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.7.1
+
+### Fixed
+
+- Progress adapts to narrow terminals, updates one line for parallel downloads, and marks estimated sizes instead of showing premature completion.
+- Download errors retain specific HTTP/network codes instead of replacing them with a generic network warning.
+- Files announced by a failed yt-dlp process are retained as unconfirmed, not treated as completed transfers; retry requires a successful backend exit.
+
 ## 1.7.0
 
 ### Added
