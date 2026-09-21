@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import { lstat, mkdir, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { cacheBase } from './paths.js';
@@ -51,6 +52,7 @@ export async function flush({ root = cacheBase(), timeoutMs = 30000, status = ()
 }
 
 export async function flushMain(args = [], { stdout = process.stdout, ...options } = {}) {
+  [args, stdout] = commandOutput(args, stdout);
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     stdout.write('veo flush [--stats]\n\nStop registered veo runs and remove local downloads (including retained and resume data)\nand retry job JSON files. Saved media, config, history and backend tools are kept.\nStatistics are kept unless --stats is supplied to reset them.\nLocked downloads from older or interrupted processes are skipped.\n');
     return 0;

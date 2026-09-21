@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -125,18 +126,27 @@ export async function pruneBackendCaches({ keep, extra = [], root, platform = pr
 }
 
 export function npmSpawnCommand({ platform = process.platform } = {}) {
-  // Fixed arguments only (no user input), so cmd.exe on Windows is safe here.
+  const args = ['install', '-g', '--no-fund', '--no-audit', `${PACKAGE}@latest`];
+  // npm.cmd needs cmd.exe on Windows. Pass a fixed command explicitly instead
+  // of Node's deprecated shell:true + args combination (DEP0190).
+  // Never interpolate user input into this command string.
+  if (platform === 'win32') return {
+    command: 'cmd.exe',
+    args: ['/d', '/s', '/c', `npm ${args.join(' ')}`],
+    shell: false,
+    windowsVerbatimArguments: true,
+  };
   return {
     command: 'npm',
-    args: ['install', '-g', '--no-fund', '--no-audit', `${PACKAGE}@latest`],
-    shell: platform === 'win32',
+    args,
+    shell: false,
   };
 }
 
 export function runNpmUpdate({ spawnImpl = spawn, platform = process.platform, signal, timeoutMs = 600_000 } = {}) {
-  const { command, args, shell } = npmSpawnCommand({ platform });
+  const { command, args, ...spawnOptions } = npmSpawnCommand({ platform });
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(command, args, { shell, stdio: 'inherit', windowsHide: true, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
+    const child = spawnImpl(command, args, { ...spawnOptions, stdio: 'inherit', windowsHide: true, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
     child.once('error', reject);
     child.once('close', resolve);
   });
@@ -163,6 +173,7 @@ export async function updateMain(args, {
   pruneRoot = undefined,
   activeBackend,
 } = {}) {
+  [args, stdout, stderr] = commandOutput(args, stdout, stderr);
   current = current ?? await packageVersion();
   const isCheckCommand = args[0] === 'check';
   const rest = isCheckCommand ? args.slice(2) : args.slice(1);

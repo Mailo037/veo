@@ -9,6 +9,80 @@ const download = (options, dependencies = {}) => actualDownload(options, { local
 
 const URL = 'https://example.com/video';
 
+test('video formats remux by default and conversion requires opt-in', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-remux-'));
+  try {
+    for (const recode of [false, true]) {
+      const calls = [];
+      await download({ url: URL, output: directory, format: 'mkv', recode }, fakeBackend({ calls }));
+      const args = calls.find(args => args.includes('-o'));
+      assert.ok(args.includes(recode ? '--recode-video' : '--remux-video'));
+      assert.ok(!args.includes(recode ? '--remux-video' : '--recode-video'));
+      assert.equal(args[args.indexOf('--concurrent-fragments') + 1], '8');
+    }
+    const options = { url: URL, output: directory, format: 'mkv' };
+    assert.notEqual(localRequestKey(options), localRequestKey({ ...options, recode: true }));
+    assert.equal(localRequestKey(options), localRequestKey({ ...options, concurrentFragments: 1, playlistConcurrency: 1 }));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('playlist workers bound concurrency, serialize callbacks and preserve output order', async () => {
+  for (const concurrency of [1, 2, 3]) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-parallel-'));
+    let active = 0, peak = 0, notifying = 0;
+    const entries = [1, 2, 3, 4].map(id => ({ id: String(id), title: `Entry ${id}` }));
+    const runner = async (_, args, { onLine } = {}) => {
+      const index = Number(args[args.indexOf('--playlist-items') + 1]);
+      if (args.includes('--dump-single-json')) return JSON.stringify(index ? entries[index - 1] : { entries });
+      peak = Math.max(peak, ++active);
+      await new Promise(resolve => setTimeout(resolve, index === 1 ? 60 : 15));
+      const file = path.join(path.dirname(args[args.indexOf('-o') + 1]), 'media.mp4');
+      await writeFile(file, `entry ${index}`);
+      onLine(`veo-file:${JSON.stringify(file)}`);
+      active--;
+    };
+    try {
+      const result = await download({ url: URL, output: directory, playlist: true, playlistConcurrency: concurrency }, {
+        backendResolver: fakeBackend({ calls: [] }).backendResolver, runner,
+        onEntry: async () => {
+          assert.equal(++notifying, 1);
+          await new Promise(resolve => setTimeout(resolve, 15));
+          notifying--;
+        },
+      });
+      assert.equal(peak, concurrency);
+      assert.equal(result.saved, 4);
+      assert.deepEqual(result.files.map(file => path.basename(file)), entries.map(entry => `${entry.title}.mp4`));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('playlist cancellation drains active workers without starting queued entries', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-parallel-cancel-'));
+  const controller = new AbortController();
+  let started = 0, active = 0;
+  const entries = [1, 2, 3, 4].map(id => ({ id: String(id), title: `Entry ${id}` }));
+  const runner = async (_, args, { signal } = {}) => {
+    const index = Number(args[args.indexOf('--playlist-items') + 1]);
+    if (args.includes('--dump-single-json')) return JSON.stringify(index ? entries[index - 1] : { entries });
+    active++; started++;
+    try {
+      if (started === 2) controller.abort();
+      if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      await new Promise(resolve => setTimeout(resolve, 15));
+      signal.throwIfAborted();
+    } finally { active--; }
+  };
+  try {
+    await assert.rejects(download({ url: URL, output: directory, playlist: true }, {
+      backendResolver: fakeBackend({ calls: [] }).backendResolver, runner, signal: controller.signal,
+    }), { name: 'AbortError' });
+    assert.equal(started, 2);
+    assert.equal(active, 0);
+    assert.deepEqual(await readdir(directory), []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 function fakeBackend({ metadata = {}, calls } = {}) {
   const resolver = async () => ({ ytDlp: 'yt-dlp-fake', ffmpegLocation: path.join('C:', 'fake-tools') });
   const runner = async (executable, args, { onLine } = {}) => {
@@ -364,8 +438,9 @@ test('collections download every entry with its own title and sidecars', async (
     // Collections stage by index and never use --no-playlist.
     assert.ok(calls[0].includes('--flat-playlist'));
     assert.ok(!calls[1].includes('--no-playlist'));
-    assert.match(calls[2][calls[2].indexOf('-o') + 1], /media\.%\(ext\)s$/);
-    assert.ok(calls[2].includes('--write-subs'));
+    const mediaCall = calls.find(args => args.includes('-o'));
+    assert.match(mediaCall[mediaCall.indexOf('-o') + 1], /media\.%\(ext\)s$/);
+    assert.ok(mediaCall.includes('--write-subs'));
     assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.veo') && name !== '.veo-history'), []);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

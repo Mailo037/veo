@@ -1,3 +1,7 @@
+import { ensureCompatibility } from './compatibility.js';
+import { adaptiveRun, reducedLimit, phaseTimer, formatTimings } from './execution.js';
+import { mediaDestination, prepareDestination } from './naming.js';
+import { estimateMediaBytes, reserveSpace } from './disk-space.js';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { lstat, mkdir, open, readdir, rm, stat } from 'node:fs/promises';
@@ -130,8 +134,14 @@ function sourceKey(metadata, url) {
 function downloadSettings(options) {
   options = { quality: 'best', audio: false, closestQuality: false, subs: false, embedSubs: false,
     embedMetadata: false, embedThumbnail: false, ...options };
-  return Object.fromEntries(['quality', 'audio', 'format', 'closestQuality', 'subs', 'subLangs', 'embedSubs',
+  const settings = Object.fromEntries(['quality', 'audio', 'format', 'closestQuality', 'subs', 'subLangs', 'embedSubs',
     'embedMetadata', 'embedThumbnail', 'sponsorblockRemove', 'section'].map(key => [key, options[key] ?? null]));
+  // Existing conversion jobs retain their keys; remux requests must not reuse them.
+  if (options.format && !options.audio && !options.recode) settings.videoRemux = true;
+  if (options.compatible) settings.compatible = true;
+  if (options.filenameTemplate) settings.filenameTemplate = options.filenameTemplate;
+  if (options.folderTemplate) settings.folderTemplate = options.folderTemplate;
+  return settings;
 }
 
 export function localRequestKey(options) {
@@ -199,7 +209,7 @@ function backendArgs(options, backend) {
     '--ffmpeg-location', backend.ffmpegLocation];
   if (!options.playlist) common.push('--no-playlist');
   if (options._entryIndex) common.push('--playlist-items', String(options._entryIndex));
-  if (options.concurrentFragments) common.push('--concurrent-fragments', String(options.concurrentFragments));
+  common.push('--concurrent-fragments', String(options.concurrentFragments ?? 8));
   // Credentials are opt-in per invocation and only ever forwarded to the backend,
   // which never bypasses access controls on its own.
   if (options.cookies) common.push('--cookies', options.cookies);
@@ -218,13 +228,14 @@ function mediaArgs(options, quality) {
     if (quality.format) args.push('-f', quality.format);
     // Merge into a permissive container first; e.g. H.264 cannot be merged
     // straight into WebM before the requested codec conversion runs.
-    if (options.format) args.push('--merge-output-format', 'mkv', '--recode-video', options.format);
+    if (options.compatible) args.push('--merge-output-format', 'mkv');
+    else if (options.format) args.push('--merge-output-format', 'mkv', options.recode ? '--recode-video' : '--remux-video', options.format);
     else args.push('--merge-output-format', 'mp4/mkv');
   }
   const sort = ['vcodec:h264,acodec:aac', quality.sort].filter(Boolean).join(',');
-  // Codec preference only applies when the source container is kept; a
-  // deliberate conversion should start from the best source available.
-  const selectedSort = options.format ? quality.sort : sort;
+  // Prefer broadly playable sources for MP4/MKV too. Explicit recoding and
+  // WebM keep their own source selection. Resolution remains the primary choice.
+  const selectedSort = options.recode || options.format === 'webm' ? quality.sort : sort;
   if (!options.audio && selectedSort) args.push('-S', selectedSort);
   if (options.subs || options.subLangs || options.embedSubs) {
     args.push('--write-subs', '--sub-langs', options.subLangs || 'en.*,en');
@@ -304,8 +315,11 @@ export async function planDownload(options, { signal, backendResolver = resolveB
   const reserved = new Set();
   const exists = async candidate => reserved.has(candidate) || Boolean(await stat(candidate).catch(() => undefined));
   const planned = [];
-  for (const title of titles) {
-    const target = await previewPath(directory, title, extension, { exists });
+  for (const [offset, title] of titles.entries()) {
+    const { entry, index } = selected[offset];
+    const destination = mediaDestination({ ...options, _entryIndex: metadata.entries ? index : options._entryIndex, _playlistTitle: metadata.entries ? metadata.title : options._playlistTitle }, entry, title);
+    await prepareDestination(directory, destination.directory);
+    const target = await previewPath(destination.directory, destination.title, extension, { exists });
     reserved.add(target);
     planned.push({ title, path: target });
   }
@@ -316,26 +330,50 @@ async function downloadCollection(options, metadata, dependencies) {
   const { reporter, signal } = dependencies;
   const entries = selectedEntries(metadata, options.playlistItems);
   reporter?.status(describeEstimate(sizeEstimate(entries)));
-  const files = [], failures = [];
+  const results = new Array(entries.length), failures = [], entryTimings = [];
   let saved = 0, skipped = 0;
-  for (const [offset, { entry, index }] of entries.entries()) {
-    signal?.throwIfAborted();
-    reporter?.item?.(offset + 1, entries.length, entry?.title || `Entry ${index}`);
-    const itemOptions = { ...options, _entryIndex: index,
-      rename: options.rename?.includes('*') ? options.rename : options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : undefined };
-    try {
-      const result = await download(itemOptions, dependencies);
-      files.push(...result.files);
-      if (result.status === 'skipped') skipped++; else saved++;
-      await dependencies.onEntry?.({ index, status: result.status || 'saved', files: result.files });
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      failures.push({ index, error: error.message });
-      reporter?.status(`Entry ${index} failed: ${error.message}`);
-      await dependencies.onEntry?.({ index, status: 'failed', error: error.message });
+  let next = 0;
+  let notifications = Promise.resolve();
+  const concurrency = options.playlistConcurrency ?? 2;
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error('Playlist concurrency must be between 1 and 4.');
+  const notify = entry => {
+    const pending = notifications.then(() => dependencies.onEntry?.(entry));
+    notifications = pending.catch(() => {});
+    return pending;
+  };
+  const worker = async workerIndex => {
+    while (next < entries.length && workerIndex < reducedLimit(concurrency, dependencies.adaptiveState)) {
+      signal?.throwIfAborted();
+      const offset = next++;
+      const { entry, index } = entries[offset];
+      const title = entry?.title || `Entry ${index}`;
+      const childReporter = concurrency > 1 ? reporter?.scoped?.(index, metadata.entries.length, title) || reporter : reporter;
+      if (concurrency === 1) reporter?.item?.(offset + 1, entries.length, title);
+      const itemOptions = { ...options, _entryIndex: index, _playlistTitle: metadata.title || metadata.id,
+        rename: options.rename?.includes('*') ? options.rename : options.rename ? `${options.rename} - ${String(index).padStart(3, '0')}` : undefined };
+      let outcome;
+      try {
+        const result = await download(itemOptions, { ...dependencies, reporter: childReporter, skipCacheCleanup: true });
+        results[offset] = result.files;
+        if (result.timings) entryTimings.push({ index, timings: result.timings });
+        if (result.status === 'skipped') skipped++; else saved++;
+        outcome = { index, status: result.status || 'saved', files: result.files, ...(result.timings ? { timings: result.timings } : {}) };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        failures.push({ index, error: error.message });
+        reporter?.status(`Entry ${index} failed: ${error.message}`);
+        outcome = { index, status: 'failed', error: error.message };
+      }
+      await notify(outcome);
     }
-  }
-  return { url: options.url, title: metadata.title || metadata.id || 'Playlist', files, saved, skipped, failures,
+  };
+  // Drain every active worker before returning, including after cancellation.
+  const settled = await Promise.allSettled(Array.from({ length: Math.min(concurrency, entries.length) }, (_, index) => worker(index)));
+  const rejected = settled.find(result => result.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  const files = results.flatMap(files => files || []);
+  failures.sort((a, b) => a.index - b.index);
+  return { url: options.url, title: metadata.title || metadata.id || 'Playlist', files, saved, skipped, failures, ...(entryTimings.length ? { entryTimings: entryTimings.sort((a, b) => a.index - b.index) } : {}),
     status: failures.length ? 'failed' : saved ? 'saved' : 'skipped' };
 }
 
@@ -343,10 +381,15 @@ async function downloadCollection(options, metadata, dependencies) {
  * Download one URL. Returns every file that was saved, in the order the
  * backend produced them, so collections and subtitle sidecars are reported.
  */
-export async function download(options, { signal, reporter, backendResolver = resolveBackend, runner = runBackend, onEntry, localRoot = downloadCacheRoot() } = {}) {
-  const directory = path.resolve(options.output);
+export async function download(options, { signal, reporter, backendResolver = resolveBackend, runner = runBackend, onEntry, localRoot = downloadCacheRoot(), skipCacheCleanup = false, adaptiveState = { divisor: 1 }, wait, diskChecker = reserveSpace, now, compatibilityRunner = runBackend } = {}) {
+  const timer = phaseTimer(now);
+  const timingResult = () => {
+    if (options.timings === false) return {};
+    const timings = timer.result(); reporter?.status(formatTimings(timings)); return { timings };
+  };
+  let directory = path.resolve(options.output);
   localRoot = path.resolve(localRoot);
-  await cleanupDownloadCache(localRoot);
+  if (!skipCacheCleanup) await cleanupDownloadCache(localRoot);
   const requestKey = localRequestKey(options);
   const stagingPath = path.join(localRoot, `${PARTIAL_PREFIX}${requestKey}`);
   const existingStage = await lstat(stagingPath).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
@@ -354,10 +397,14 @@ export async function download(options, { signal, reporter, backendResolver = re
   const cached = await readJson(path.join(stagingPath, 'job.json'), null);
   const readyToTransfer = cached?.requestKey === requestKey && cached.ready?.length && cached.metadata;
   const backend = readyToTransfer ? null : await prepareBackend(options, { signal, backendResolver, reporter });
-  const metadata = readyToTransfer ? cached.metadata : await fetchMetadata(options, { signal, backend, runner, reporter });
-  if (metadata.entries && !options._entryIndex) return downloadCollection(options, metadata, { signal, reporter, backendResolver: async () => backend, runner, onEntry, localRoot });
+  timer.switch('metadata');
+  const metadata = readyToTransfer ? cached.metadata : await adaptiveRun(() => fetchMetadata(options, { signal, backend, runner, reporter }), { enabled: options.adaptiveConcurrency !== false, state: adaptiveState, signal, reporter, wait, timer });
+  if (metadata.entries && !options._entryIndex) return downloadCollection(options, metadata, { signal, reporter, backendResolver: async () => backend, runner, onEntry, localRoot, adaptiveState, wait, diskChecker, now, compatibilityRunner });
+  const destination = mediaDestination(options, metadata, stagedTitle('media.mp4', metadata, options.rename));
+  directory = destination.directory;
+  await prepareDestination(options.output, directory);
   const playlist = false;
-  reporter?.name?.(stagedTitle('media.mp4', metadata, options.rename));
+  reporter?.name?.(destination.title);
   const quality = selectQuality({ quality: options.quality, audio: options.audio, closest: options.closestQuality, formats: metadata.formats, playlist });
   if (quality.error) throw new Error(quality.error);
   if (quality.label) reporter?.status(quality.label);
@@ -367,7 +414,7 @@ export async function download(options, { signal, reporter, backendResolver = re
   const history = options.skipExisting || (options.resume && options._entryIndex) ? await readJson(historyFile, null) : null;
   if (history?.files?.length && history.files.every(file => typeof file === 'string' && path.dirname(file) === directory) && (await Promise.all(history.files.map(file => stat(file).then(info => info.isFile(), () => false)))).every(Boolean)) {
     reporter?.status('Already downloaded; skipped.');
-    return { url: options.url, title: metadata.title, files: [], status: 'skipped', saved: 0, skipped: 1 };
+    return { url: options.url, title: metadata.title, files: [], status: 'skipped', saved: 0, skipped: 1, ...timingResult() };
   }
   const staging = await prepareStaging(stagingPath);
   const lockPath = path.join(staging, '.lock');
@@ -380,38 +427,51 @@ export async function download(options, { signal, reporter, backendResolver = re
   const manifestFile = path.join(staging, 'job.json');
   let keepPartial = false;
   let manifest;
+  let releaseSpace = () => {};
   try {
-    manifest = await readJson(manifestFile, { version: 1, requestKey, metadata: { id: metadata.id, title: metadata.title, extractor: metadata.extractor, extractor_key: metadata.extractor_key, formats: metadata.formats?.map(({ height, vcodec, has_drm }) => ({ height, vcodec, has_drm })) }, key, source: sourceKey(metadata, options.url), settings: downloadSettings(options), ready: [], files: [] });
+    manifest = await readJson(manifestFile, { version: 1, requestKey, metadata: { id: metadata.id, title: metadata.title, channel: metadata.channel, uploader: metadata.uploader, upload_date: metadata.upload_date, playlist_title: options._playlistTitle || metadata.playlist_title, extractor: metadata.extractor, extractor_key: metadata.extractor_key, formats: metadata.formats?.map(({ height, vcodec, has_drm }) => ({ height, vcodec, has_drm })) }, key, source: sourceKey(metadata, options.url), settings: downloadSettings(options), ready: [], files: [] });
     if (manifest.key !== key || manifest.version !== 1) throw new Error('Partial download belongs to different settings.');
     if (!Array.isArray(manifest.ready) || !Array.isArray(manifest.files)
       || manifest.ready.some(file => typeof file !== 'string' || path.dirname(file) !== staging || !isStagedMedia(path.basename(file)))
       || manifest.files.some(item => typeof item?.source !== 'string' || path.dirname(item.source) !== staging || typeof item.destination !== 'string' || path.dirname(item.destination) !== directory)) {
       throw new Error('Invalid partial download manifest.');
     }
+    if (options.checkSpace !== false) {
+      const bytes = readyToTransfer ? (await Promise.all(manifest.ready.map(file => stat(file)))).reduce((sum, info) => sum + info.size, 0) : estimateMediaBytes(metadata, options);
+      releaseSpace = await diskChecker({ cache: localRoot, destination: directory, bytes, cached: Boolean(readyToTransfer), reporter });
+    }
     delete manifest.expiresAt;
     await writeJson(manifestFile, manifest);
     // Only an after_move event proves that all postprocessing completed.
     let staged = [...new Set(manifest.ready)];
     if (!staged.length) {
-      const args = [...backendArgs(options, backend), ...mediaArgs(options, quality), '-o', stagingTemplate(staging, false), '--', options.url];
       reporter?.status(options.audio ? 'Downloading audio…' : 'Downloading…');
+      timer.switch('download');
       let writes = Promise.resolve();
       try {
-        await runner(backend.ytDlp, args, { signal, onLine(line) {
-          if (line.startsWith('veo-progress:')) {
-            const data = JSON.parse(line.slice('veo-progress:'.length));
-            reporter?.progress(data.progress ? { ...data.progress, stream: data.video === 'none' ? 'Audio' : data.audio === 'none' ? 'Video' : 'Media' } : data);
-          }
-          if (line.startsWith('veo-postprocess:')) reporter?.processing?.(JSON.parse(line.slice('veo-postprocess:'.length)));
-          if (line.startsWith('veo-file:')) {
-            const file = JSON.parse(line.slice('veo-file:'.length));
-            if (path.dirname(path.resolve(file)) !== staging || !isStagedMedia(path.basename(file))) throw new Error('The backend returned an invalid saved file path.');
-            staged.push(file);
-            manifest.ready.push(file);
-            writes = writes.then(() => writeJson(manifestFile, manifest));
-            writes.catch(() => {});
-          }
-        } });
+        await adaptiveRun(async attempt => {
+          const attemptOptions = { ...options, resume: options.resume || attempt > 0, concurrentFragments: reducedLimit(options.concurrentFragments ?? 8, adaptiveState) };
+          const args = [...backendArgs(attemptOptions, backend), ...mediaArgs(attemptOptions, quality), '-o', stagingTemplate(staging, false), '--', options.url];
+          return runner(backend.ytDlp, args, { signal, onLine(line) {
+            if (line.startsWith('veo-progress:')) {
+              if (timer.phase !== 'download') timer.switch('download');
+              const data = JSON.parse(line.slice('veo-progress:'.length));
+              reporter?.progress(data.progress ? { ...data.progress, stream: data.video === 'none' ? 'Audio' : data.audio === 'none' ? 'Video' : 'Media' } : data);
+            }
+            if (line.startsWith('veo-postprocess:')) {
+              if (timer.phase !== 'processing') timer.switch('processing');
+              reporter?.processing?.(JSON.parse(line.slice('veo-postprocess:'.length)));
+            }
+            if (line.startsWith('veo-file:')) {
+              const file = JSON.parse(line.slice('veo-file:'.length));
+              if (path.dirname(path.resolve(file)) !== staging || !isStagedMedia(path.basename(file))) throw new Error('The backend returned an invalid saved file path.');
+              staged.push(file);
+              manifest.ready.push(file);
+              writes = writes.then(() => writeJson(manifestFile, manifest));
+              writes.catch(() => {});
+            }
+          } });
+        }, { enabled: options.adaptiveConcurrency !== false, state: adaptiveState, signal, reporter, wait, timer });
       } finally { await writes; }
     }
     // Cancellation must win over any follow-up error so the caller can report
@@ -419,16 +479,25 @@ export async function download(options, { signal, reporter, backendResolver = re
     signal?.throwIfAborted();
     if (!staged.length) throw new Error('The backend finished without producing a file.');
 
+    if (!options.audio && !manifest.compatibilityChecked && (!readyToTransfer || options.compatible)) {
+      timer.switch('processing');
+      const tools = backend || await prepareBackend(options, { signal, backendResolver, reporter });
+      for (let index = 0; index < staged.length; index++) staged[index] = await ensureCompatibility(staged[index], { backend: tools, runner: compatibilityRunner, signal, convert: Boolean(options.compatible), reporter });
+      manifest.ready = staged;
+      manifest.compatibilityChecked = true;
+      await writeJson(manifestFile, manifest);
+    }
     const files = [];
+    timer.switch('saving');
     reporter?.status(readyToTransfer ? 'Retrying transfer from local cache…' : 'Saving local download to destination…');
-    await mkdir(directory, { recursive: true });
+    await prepareDestination(options.output, directory, { create: true });
     for (const stagedFile of staged) {
       const resolved = path.resolve(stagedFile);
       // The backend must only ever hand back a file inside our staging directory.
       if (path.dirname(resolved) !== staging || !(await lstat(resolved)).isFile()) throw new Error('The backend returned an invalid saved file path.');
       let record = manifest.files.find(item => item.source === resolved);
       if (record && !await stat(record.destination).then(info => info.isFile(), () => false)) record = null;
-      const saved = record?.destination || await saveUnique(resolved, directory, stagedTitle(resolved, metadata, options.rename), { signal, keepSource: true });
+      const saved = record?.destination || await saveUnique(resolved, directory, destination.title, { signal, keepSource: true });
       if (!record) {
         manifest.files = manifest.files.filter(item => item.source !== resolved);
         manifest.files.push({ source: resolved, destination: saved });
@@ -438,7 +507,7 @@ export async function download(options, { signal, reporter, backendResolver = re
       files.push(...await saveSidecars(staging, resolved, saved, { signal, manifest, manifestFile }));
     }
     await writeJson(historyFile, { version: 1, source: sourceKey(metadata, options.url), settings: downloadSettings(options), files });
-    return { url: options.url, title: metadata.title || metadata.id || 'video', files, status: 'saved', saved: 1, skipped: 0 };
+    return { url: options.url, title: metadata.title || metadata.id || 'video', files, status: 'saved', saved: 1, skipped: 0, ...timingResult() };
   } catch (error) {
     // A kept staging directory is the whole point of --resume, and cancellation
     // is the most common reason to want one.
@@ -449,6 +518,7 @@ export async function download(options, { signal, reporter, backendResolver = re
     }
     throw error;
   } finally {
+    releaseSpace();
     await lock.close();
     await rm(lockPath, { force: true });
     reporter?.finish();

@@ -8,6 +8,23 @@ import { allocate, closestHeight, sanitizeTitle, saveUnique, readableError, vali
 import { formatProgress } from '../src/progress.js';
 
 const url = 'https://example.com/video.mp4';
+
+test('download speed defaults and conversion opt-in respect CLI and config', () => {
+  const defaults = parseCli([url]);
+  assert.equal(defaults.concurrentFragments, 8);
+  assert.equal(defaults.playlistConcurrency, 2);
+  assert.equal(defaults.recode, false);
+  const configured = parseCli([url, '-N', '4', '--playlist-concurrency', '3', '--no-recode'], {
+    config: { concurrentFragments: 1, playlistConcurrency: 1, recode: true, format: 'mkv' },
+  });
+  assert.equal(configured.concurrentFragments, 4);
+  assert.equal(configured.playlistConcurrency, 3);
+  assert.equal(configured.recode, false);
+  assert.equal(parseCli([url, '--format', 'webm', '--recode']).recode, true);
+  for (const value of ['0', '5', '1.5', 'no']) assert.throws(() => parseCli([url, '--playlist-concurrency', value]), /between 1 and 4/);
+  assert.throws(() => parseCli([url, '--recode']), /requires --format/);
+  assert.throws(() => parseCli([url, '--audio', '--format', 'mp3', '--recode']), /video mode/);
+});
 test('CLI defaults, flags, help, and version', () => {
   const defaults = parseCli([url]);
   assert.equal(defaults.quality, 'best');

@@ -2,6 +2,47 @@ import { translateLegacyConfigComments } from './legacy-config-comments.js';
 
 export const TEMPLATE_MARKER = '// veo: commented configuration template';
 
+const PROFILE_OPTIONS_MARKER = '// veo: profile download options v4';
+export const PROFILE_OPTIONS_GUIDE = String.raw`${PROFILE_OPTIONS_MARKER}
+// Any global option can also be placed inside a profile.
+// Copy the settings you want into "profiles" > "default" or a named profile.
+// Remove the leading // on copied settings; separate entries with commas.
+// Speed without reducing the selected video quality:
+// "quality": "best",
+// "concurrentDownloads": 2,    // Parallel URLs/batch items: 1-4; default 2
+// "adaptiveConcurrency": true, // Reduce parallelism and retry transient errors
+// "concurrentFragments": 8,    // DASH/HLS fragments: 1-16; default 8
+// "playlist": true,            // Enable only for playlist downloads
+// "playlistConcurrency": 2,    // Simultaneous entries: 1-4; default 2
+// "checkSpace": true,          // Estimate free cache/output space first
+// "timings": true,             // Show time spent in each phase
+// "color": true,               // Gray details and colored results; false = plain text
+// Applies to veo's own terminal output, including stats/history/doctor.
+// Each profile can set color independently; NO_COLOR always disables styling.
+// Example inside profiles: "plain": { "color": false }
+// Use: veo stats --profile plain or veo URL --profile plain
+// "folderTemplate": "{channel}/{year}",
+// "filenameTemplate": "{index} - {title}", // Without extension; do not combine with rename
+// "resume": true,
+// "skipExisting": true
+// Lossless container change (the selected codecs must fit the container):
+// "format": "mkv",
+// "compatible": false,        // Opt-in H.264/AAC MP4; converts only when needed
+// "recode": false
+// Compatibility profile to add inside profiles:
+// "kompatibel": { "audio": false, "format": "mp4", "compatible": true, "recode": false }
+// Use: veo URL --profile kompatibel (or simply veo URL --compatible).
+// Optional conversion instead: "format": "webm", "recode": true
+// Conversion can be slower and lose quality; recode is for video only.
+// Sequential downloads: "concurrentDownloads": 1, "concurrentFragments": 1, "playlistConcurrency": 1
+// Example named profile inside the profiles object:
+// "fast": { "quality": "best", "concurrentFragments": 8, "playlistConcurrency": 2, "resume": true }
+// Use with: veo URL --profile fast (add --playlist for a playlist URL).
+// Inspect: veo config show --profile fast | Validate: veo config check
+// Template fields: {title}, {id}, {channel}, {year}, {playlist}, {index}.
+// Missing values use Unknown channel/year, No playlist, unknown ID, index 001.
+`;
+
 export const CONFIG_TEMPLATE = String.raw`${TEMPLATE_MARKER}
 // Save and close the editor. Settings apply the next time you run veo.
 // Comments using // or /* ... */ are supported. Command-line options take priority.
@@ -16,12 +57,14 @@ export const CONFIG_TEMPLATE = String.raw`${TEMPLATE_MARKER}
 
   // Maximum video resolution: best, 2160p, 1440p, 1080p, 720p, ...
   // "quality": "1080p",
-  // Video format: mp4, mkv, webm, mov. Conversion can take time.
+  // Video format: mp4, mkv, webm, mov. Lossless remux; codecs must fit the container.
   // "format": "mp4",
+  // "recode": false,           // Explicit video conversion; may lose quality
+  // "playlistConcurrency": 2, // Concurrent playlist entries: 1 to 4
   // "open": false,              // Open the completed file automatically
   // "resume": true,             // Resume interrupted downloads
   // "skipExisting": true,       // Skip previously saved downloads
-  // "concurrentFragments": 4,   // Concurrent fragments: 1 to 16
+  // "concurrentFragments": 8,   // Concurrent fragments: 1 to 16; default 8
 
   // Subtitles and additional information:
   // "subLangs": "de,en",        // Enable subtitles for these languages
@@ -30,12 +73,20 @@ export const CONFIG_TEMPLATE = String.raw`${TEMPLATE_MARKER}
   // "embedThumbnail": true,     // Embed the thumbnail
 
   // The default profile is used automatically unless you select another profile.
+${PROFILE_OPTIONS_GUIDE}
   // Select other profiles with --profile NAME or in the interactive wizard.
   // Example: veo "https://example.com/video.mp4" --profile music
   "profiles": {
     "default": {
+      // "color": true, // Set false to disable terminal styling for this profile.
       // Add everyday defaults here, for example: "quality": "1080p"
       // Empty means use the global settings above and veo's built-in defaults.
+    },
+    "kompatibel": {
+      "audio": false,
+      "format": "mp4",
+      "compatible": true,
+      "recode": false
     },
     "music": {
       // Audio only. Formats: mp3, m4a, aac, opus, flac, wav.
@@ -84,7 +135,11 @@ export function withConfigTemplate(text) {
   text = translateLegacyConfigComments(text);
   text = addDefaultProfile(text);
   if (!text.replace(/^\uFEFF/, '').trim()) return CONFIG_TEMPLATE;
-  if (text.replace(/^\uFEFF/, '').startsWith(TEMPLATE_MARKER)) return text;
+  if (text.replace(/^\uFEFF/, '').startsWith(TEMPLATE_MARKER)) {
+    // Upgrade the commented reference in older configs without changing settings.
+    if (!text.includes(PROFILE_OPTIONS_MARKER)) return text.replace(TEMPLATE_MARKER, `${TEMPLATE_MARKER}\n${PROFILE_OPTIONS_GUIDE}`);
+    return text;
+  }
   // Keep existing settings and formatting byte-for-byte after a commented guide.
   return `${TEMPLATE_MARKER}\n// Reference: copy any examples you need into your existing configuration below.\n${CONFIG_TEMPLATE.split('\n').slice(1).map(line => `// ${line}`).join('\n')}\n// Your existing settings:\n${text.replace(/^\uFEFF/, '')}`;
 }

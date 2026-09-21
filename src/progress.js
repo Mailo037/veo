@@ -1,6 +1,14 @@
 import { cleanText } from './utils.js';
 import { createTerminalTitle } from './terminal-title.js';
 
+const PROCESSING_LABELS = { Merger: 'Merging audio/video', VideoRemuxer: 'Changing video container', VideoConvertor: 'Converting video', ExtractAudio: 'Converting audio', EmbedSubtitle: 'Embedding subtitles', Metadata: 'Writing metadata', EmbedThumbnail: 'Embedding thumbnail', MoveFiles: 'Preparing saved file' };
+
+export function styleText(stream, text, role = 'muted', enabled = true, env = process.env) {
+  if (!enabled || !stream.isTTY || Object.hasOwn(env, 'NO_COLOR') || env.TERM === 'dumb') return text;
+  const codes = { muted: 90, title: 1, success: 32, error: 31 };
+  return '\x1b[' + (codes[role] || 90) + 'm' + text + '\x1b[0m';
+}
+
 function bytes(value) {
   if (!Number.isFinite(value) || value < 0) return '?';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -19,6 +27,9 @@ export function formatProgress(data) {
 }
 
 export function createReporter(stream = process.stderr, { setTitle = createTerminalTitle(stream) } = {}) {
+  let color = true;
+  const muted = text => styleText(stream, text, 'muted', color);
+  const heading = text => styleText(stream, text, 'title', color);
   let active = false;
   let lastLog = 0;
   let name = '';
@@ -32,38 +43,63 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     if (active && stream.isTTY) stream.write('\r\x1b[2K');
     active = false;
   }
+  const scoped = (index, total, title, parent = '') => {
+    let childName = cleanText(title), lastProgress = 0;
+    const prefix = parent + '[' + index + '/' + total + '] ';
+    const log = (message, quiet = true) => {
+      clear();
+      const line = prefix + childName + ': ' + cleanText(message);
+      stream.write((quiet ? muted(line) : line) + '\n');
+      phase = cleanText(message); name = childName;
+      if (started) updateTitle();
+    };
+    return {
+      scoped: (index, total, title) => scoped(index, total, title, prefix),
+      name(value) { childName = cleanText(value); },
+      status: log,
+      progress(data) {
+        if (Date.now() - lastProgress >= 5000 || data.status === 'finished') {
+          log((data.stream || 'Media') + ' ' + formatProgress(data), false);
+          lastProgress = Date.now();
+        }
+      },
+      processing(data) { log((PROCESSING_LABELS[data.postprocessor] || 'Processing media') + (data.status === 'finished' ? ': done' : '…')); },
+      finish() {},
+    };
+  };
   return {
+    configure(options) { color = options.color !== false; },
+    scoped,
     item(index, total, title) {
       clear(); position = total > 1 ? `[${index}/${total}] ` : ''; hasItem = true; name = cleanText(title); streamName = ''; lastLog = 0;
-      stream.write(`${position}${name}\n`);
+      stream.write(heading(`${position}${name}`) + '\n');
       phase = 'Starting…'; if (started) updateTitle();
     },
     processing(data) {
       const processor = cleanText(data.postprocessor || 'Processing');
-      const labels = { Merger: 'Merging audio/video', VideoConvertor: 'Converting video', ExtractAudio: 'Converting audio', EmbedSubtitle: 'Embedding subtitles', Metadata: 'Writing metadata', EmbedThumbnail: 'Embedding thumbnail', MoveFiles: 'Preparing saved file' };
-      const label = labels[processor] || 'Processing media';
+      const label = PROCESSING_LABELS[processor] || 'Processing media';
       clear(); phase = `${label}${data.status === 'finished' ? ': done' : '…'}`;
       if (started) updateTitle();
-      stream.write(`${position}${phase}\n`);
+      stream.write(muted(`${position}${phase}`) + '\n');
     },
     start(title = '') { started = true; name = cleanText(title); phase = 'Starting…'; updateTitle(); },
     name(title) {
       const next = cleanText(title);
-      if (hasItem && next !== name) { clear(); stream.write(`${position}${next}\n`); }
+      if (hasItem && next !== name) { clear(); stream.write(heading(`${position}${next}`) + '\n'); }
       name = next; if (started) updateTitle();
     },
     status(message) {
       clear();
       phase = cleanText(message);
       if (started) updateTitle();
-      stream.write(`${phase}\n`);
+      stream.write(muted(phase) + '\n');
     },
     complete() { clear(); phase = 'Done'; if (started) updateTitle(); },
     fail(cancelled = false) { clear(); phase = cancelled ? 'Cancelled' : 'Failed'; if (started) updateTitle(); },
     progress(data) {
       if (data.stream && data.stream !== streamName) {
         clear(); streamName = data.stream; lastLog = 0;
-        stream.write(`${position}${streamName} download\n`);
+        stream.write(muted(`${position}${streamName} download`) + '\n');
       }
       const total = data.total_bytes || data.total_bytes_estimate;
       const percent = Number.isFinite(total) && total > 0 && Number.isFinite(data.downloaded_bytes)

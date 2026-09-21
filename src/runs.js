@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import { randomInt, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -248,6 +249,7 @@ function normalizeId(value) {
 }
 
 export async function runsMain(args = [], { stdout = process.stdout, root = cacheBase() } = {}) {
+  [args, stdout] = commandOutput(args, stdout);
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     stdout.write(RUNS_HELP);
     return 0;
@@ -284,6 +286,7 @@ export async function waitForExit(runs, timeoutMs) {
 }
 
 export async function stopMain(args = [], { stdout = process.stdout, root = cacheBase(), timeoutMs = STOP_TIMEOUT_MS } = {}) {
+  [args, stdout] = commandOutput(args, stdout);
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     stdout.write(STOP_HELP);
     return 0;

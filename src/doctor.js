@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -229,6 +230,7 @@ export async function doctorMain(args = [], {
   registry = defaultRegistry(env),
   ...deps
 } = {}) {
+  [args, stdout, stderr] = commandOutput(args, stdout, stderr);
   let offline = false;
   let output;
   const fix = args[0] === 'fix';

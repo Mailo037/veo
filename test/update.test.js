@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import os from 'node:os';
 import { createServer } from 'node:http';
 import {
   compareVersions, defaultRegistry, fetchLatestVersion, maybeUpdateNotice,
-  updateMain, pruneBackendCaches, npmSpawnCommand, UPDATE_HELP,
+  updateMain, pruneBackendCaches, npmSpawnCommand, runNpmUpdate, UPDATE_HELP,
 } from '../src/updater.js';
 import { main } from '../src/cli.js';
 
@@ -95,6 +96,7 @@ test('update runs npm install and prunes old backend caches', async () => {
     const out = jsonOutput();
     const err = jsonOutput();
     const code = await updateMain(['update'], {
+      platform: 'linux',
       current: '1.0.0',
       fetchImpl: async () => ({ ok: true, json: async () => ({ version: '1.0.2' }) }),
       spawnImpl(command, args, options) {
@@ -116,9 +118,12 @@ test('update runs npm install and prunes old backend caches', async () => {
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('npm spawn uses a shell only on Windows and reports ENOENT cleanly', async () => {
+test('npm spawn avoids shell:true on every platform and reports ENOENT cleanly', async () => {
   const spec = npmSpawnCommand({ platform: 'win32' });
-  assert.equal(spec.shell, true);
+  assert.equal(spec.shell, false);
+  assert.equal(spec.command, 'cmd.exe');
+  assert.deepEqual(spec.args, ['/d', '/s', '/c', 'npm install -g --no-fund --no-audit @mailo037/veo@latest']);
+  assert.equal(spec.windowsVerbatimArguments, true);
   assert.equal(npmSpawnCommand({ platform: 'linux' }).shell, false);
   const out = jsonOutput();
   const err = jsonOutput();
@@ -131,6 +136,30 @@ test('npm spawn uses a shell only on Windows and reports ENOENT cleanly', async 
   });
   assert.equal(code, 1);
   assert.match(err.text(), /npm was not found/);
+});
+
+test('Windows update launches npm.cmd with literal arguments and preserves its exit code', { skip: process.platform !== 'win32' }, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo npm test '));
+  const warnings = [];
+  const onWarning = warning => warnings.push(warning.code);
+  process.on('warning', onWarning);
+  try {
+    await writeFile(path.join(directory, 'npm.cmd'), '@echo off\r\necho %*\r\nexit /b 7\r\n');
+    let output = '';
+    const code = await runNpmUpdate({ spawnImpl(command, args, options) {
+      assert.equal(options.shell, false);
+      const child = spawn(command, args, { ...options, cwd: directory, stdio: ['ignore', 'pipe', 'pipe'] });
+      child.stdout.on('data', data => { output += data; });
+      child.stderr.on('data', data => { output += data; });
+      return child;
+    } });
+    assert.equal(code, 7);
+    assert.equal(output.trim(), 'install -g --no-fund --no-audit @mailo037/veo@latest');
+    assert.ok(!warnings.includes('DEP0190'));
+  } finally {
+    process.off('warning', onWarning);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('CLI routes update subcommands without URL validation', async () => {

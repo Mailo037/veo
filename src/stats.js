@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import { randomUUID } from 'node:crypto';
 import { readdir, lstat, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -46,6 +47,7 @@ export async function resetStats(root = cacheBase()) {
 }
 
 export async function statsMain(args = [], { stdout = process.stdout, root = cacheBase() } = {}) {
+  [args, stdout] = commandOutput(args, stdout);
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     stdout.write('veo stats [--json]\n\nShow recorded download totals. Time includes preparation, processing and saving,\nincluding failed attempts. Parallel run times are added together.\nStats start with this version; old downloads are not imported.\nUse veo flush --stats to clear temporary data and reset statistics.\n');
     return 0;

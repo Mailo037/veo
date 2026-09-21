@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
 import {
@@ -108,6 +109,7 @@ export async function backendUpdateMain(args = [], {
   reset = clearBackendOverride,
   removeFiles = directory => rm(directory, { recursive: true, force: true }),
 } = {}) {
+  [args, stdout, stderr] = commandOutput(args, stdout, stderr);
   const [command, ...rest] = args;
   if (command === undefined || command === '-h' || command === '--help' || rest.includes('-h') || rest.includes('--help')) {
     stdout.write(BACKEND_HELP);

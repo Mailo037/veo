@@ -8,6 +8,20 @@ function stream(isTTY = true) {
   return { isTTY, output: '', write(text) { this.output += text; } };
 }
 
+test('parallel playlist progress keeps each title and stream attached to its entry', () => {
+  const output = stream();
+  const reporter = createReporter(output, { setTitle() {} });
+  const first = reporter.scoped(1, 2, 'First');
+  const second = reporter.scoped(2, 2, 'Second');
+  first.name('Renamed first');
+  second.progress({ stream: 'Audio', downloaded_bytes: 10, total_bytes: 20 });
+  first.progress({ stream: 'Video', downloaded_bytes: 10, total_bytes: 10 });
+  second.processing({ postprocessor: 'VideoRemuxer', status: 'finished' });
+  assert.match(output.output, /\[2\/2\] Second: Audio/);
+  assert.match(output.output, /\[1\/2\] Renamed first: Video/);
+  assert.match(output.output, /\[2\/2\] Second: Changing video container: done/);
+});
+
 test('rename accepts short/long flags and rejects empty names', () => {
   const url = 'https://example.com/video.mp4';
   assert.equal(parseCli([url, '-r', 'My Video']).rename, 'My Video');

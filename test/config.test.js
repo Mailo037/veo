@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { configFile, loadConfig, prepareConfigEdit, CONFIG_KEYS } from '../src/config.js';
-import { CONFIG_TEMPLATE, stripConfigComments, withConfigTemplate } from '../src/config-template.js';
+import { CONFIG_TEMPLATE, PROFILE_OPTIONS_GUIDE, stripConfigComments, withConfigTemplate } from '../src/config-template.js';
 
 test('the config location follows each platform convention and VEO_CONFIG', () => {
   assert.equal(configFile({ env: { VEO_CONFIG: './custom.json' } }), path.resolve('./custom.json'));
@@ -122,6 +122,14 @@ test('config edit fills new and empty files and preserves existing settings', as
     assert.deepEqual(loaded.profiles.default, {});
     await prepareConfigEdit(file);
     assert.equal(await readFile(file, 'utf8'), annotated, 'do not duplicate the guide');
+    const olderTemplate = CONFIG_TEMPLATE.replace(PROFILE_OPTIONS_GUIDE, '');
+    await writeFile(file, olderTemplate);
+    await prepareConfigEdit(file);
+    const refreshed = await readFile(file, 'utf8');
+    assert.ok(refreshed.includes(PROFILE_OPTIONS_GUIDE));
+    assert.deepEqual(JSON.parse(stripConfigComments(refreshed)), JSON.parse(stripConfigComments(olderTemplate)));
+    await prepareConfigEdit(file);
+    assert.equal(await readFile(file, 'utf8'), refreshed, 'profile guide is added only once');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

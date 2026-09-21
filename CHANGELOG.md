@@ -2,6 +2,27 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.6.0
+
+### Added
+
+- Parallel URL and batch downloads with serialized jobs, per-item statistics, and adaptive retries with reduced concurrency.
+- Parallel playlist downloads (two playlist entries concurrently by default, `--playlist-concurrency 1-4`), with per-entry progress, serialized job updates, and cancellation that waits for active workers.
+- Concurrent DASH/HLS fragment downloads (up to eight DASH/HLS fragments concurrently by default; `-N` overrides this).
+- Safe filename and folder templates, free-space estimates, and phase timings.
+- Offline config commands: `veo config check` and `veo config show`, and full option documentation in the config editor.
+- Prefer H.264/AAC for explicit MP4 downloads, report incompatible original codecs, and add opt-in `--compatible` / `kompatibel` profile with conditional H.264/AAC conversion.
+- `--recode` flag for explicitly converting video formats when remuxing is incompatible.
+
+### Changed
+
+- Video `--format` now remuxes without quality loss; incompatible codecs fail instead of being converted silently.
+- Apply consistent terminal styling to all veo command reports and help, including stats; dim terminal status details and highlight titles, successful saves and failures; preserve plain JSON/piped output and honor `--no-color`, `NO_COLOR` and config color preferences.
+
+### Fixed
+
+- Fix Node.js DEP0190 warnings during Windows self-updates by invoking cmd.exe explicitly with a fixed npm command.
+
 ## 1.5.0
 
 ### Added

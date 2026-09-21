@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import { randomUUID } from 'node:crypto';
 import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -133,6 +134,7 @@ export function formatHistory(entries, limit = HISTORY_LIMIT) {
 }
 
 export async function historyMain(args = [], { stdout = process.stdout, root = cacheBase(), limit = HISTORY_LIMIT } = {}) {
+  [args, stdout] = commandOutput(args, stdout);
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     stdout.write(HISTORY_HELP);
     return 0;

@@ -1,3 +1,4 @@
+import { commandOutput } from './output.js';
 import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -10,9 +11,19 @@ import { CONFIG_TEMPLATE, stripConfigComments, withConfigTemplate } from './conf
  * Everything here is a default only: an explicit command-line flag always wins.
  */
 export const CONFIG_KEYS = Object.freeze({
+  concurrentDownloads: 'number',
+  adaptiveConcurrency: 'boolean',
+  filenameTemplate: 'string',
+  folderTemplate: 'string',
+  checkSpace: 'boolean',
+  timings: 'boolean',
+  color: 'boolean',
   output: 'string',
   quality: 'string',
   format: 'string',
+  compatible: 'boolean',
+  recode: 'boolean',
+  playlistConcurrency: 'number',
   rename: 'string',
   audio: 'boolean',
   open: 'boolean',
@@ -127,12 +138,34 @@ export async function prepareConfigEdit(file) {
 }
 
 export async function configMain(args) {
+  let stdout;
+  [args, stdout] = commandOutput(args, process.stdout);
+  if (args[0] === 'show') stdout = process.stdout;
   const file = configFile();
+  if (['check', 'show'].includes(args[0])) {
+    const { parseArgs } = await import('node:util');
+    const { values, positionals } = parseArgs({ args: args.slice(1), allowPositionals: true, options: { profile: { type: 'string' } } });
+    if (positionals.length) throw new Error('Usage: veo config check|show [--profile NAME]');
+    const loaded = await loadConfig({ file });
+    if (loaded.warnings.length) throw new Error(loaded.warnings.join('\n'));
+    if (args[0] === 'show') {
+      const effective = await effectiveConfig(loaded.config, values.profile);
+      stdout.write(`${JSON.stringify(effective, null, 2)}\n`);
+    } else {
+      const names = values.profile ? [values.profile] : [undefined, ...Object.keys(loaded.config.profiles || {})];
+      for (const name of names) {
+        try { await effectiveConfig(loaded.config, name); }
+        catch (error) { throw new Error(`Profile ${name || 'default/global'}: ${error.message}`); }
+      }
+      stdout.write(`Config OK: ${file} (${names.length} effective configurations checked).\n`);
+    }
+    return 0;
+  }
   if (args.length !== 1 || !['edit', 'path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles');
-  if (args[0] === 'path') { process.stdout.write(`${file}\n`); return 0; }
+  if (args[0] === 'path') { stdout.write(`${file}\n`); return 0; }
   if (args[0] === 'profiles') {
     const loaded = await loadConfig();
-    process.stdout.write(`${Object.keys(loaded.config.profiles || {}).join('\n') || 'No profiles configured. Use veo config edit.'}\n`);
+    stdout.write(`${Object.keys(loaded.config.profiles || {}).join('\n') || 'No profiles configured. Use veo config edit.'}\n`);
     return 0;
   }
   await prepareConfigEdit(file);
@@ -145,4 +178,17 @@ export async function configMain(args) {
   });
   await loadConfig();
   return 0;
+}
+
+export async function effectiveConfig(config, profile) {
+  const { parseCli } = await import('./cli.js');
+  const selected = applyProfile(config, profile);
+  // Inspection is offline and never prints credential file paths or browser profiles.
+  const { cookies, cookiesFromBrowser, ...safe } = selected;
+  const parsed = parseCli(['https://example.invalid/config-check'], { config: safe });
+  const result = Object.fromEntries(Object.keys(CONFIG_KEYS).filter(key => parsed[key] !== undefined).map(key => [key, parsed[key]]));
+  result.output = path.resolve(result.output);
+  if (cookies !== undefined) result.cookies = '[configured]';
+  if (cookiesFromBrowser !== undefined) result.cookiesFromBrowser = '[configured]';
+  return result;
 }

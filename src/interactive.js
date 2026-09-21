@@ -1,3 +1,4 @@
+import { outputStream, formatOutput } from './output.js';
 import { createInterface } from 'node:readline/promises';
 import { availableHeights, cleanText, validateUrl } from './utils.js';
 import { applyProfile } from './config.js';
@@ -5,11 +6,13 @@ import { fetchMetadata, prepareBackend, runBackend } from './downloader.js';
 import { describeEstimate, selectedEntries, sizeEstimate, validateItems } from './playlist.js';
 
 export async function interactiveArgs(config, { signal, input = process.stdin, output = process.stderr, ask, inspect } = {}) {
-  const rl = ask ? null : createInterface({ input, output });
+  const terminalOutput = output;
+  output = outputStream(output);
+  const rl = ask ? null : createInterface({ input, output: terminalOutput });
   const controller = new AbortController();
   signal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   rl?.on('SIGINT', () => controller.abort());
-  const question = ask || (prompt => rl.question(prompt, { signal }));
+  const question = ask || (prompt => rl.question(formatOutput(prompt, terminalOutput), { signal }));
   const choose = async (prompt, allowed, fallback) => {
     while (true) {
       const answer = (await question(prompt)).trim() || fallback;

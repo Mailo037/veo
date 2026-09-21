@@ -95,7 +95,7 @@ test('playlist failure preserves successes and resume downloads only the missing
     await writeFile(file, `video ${index}`);
     onLine(`veo-file:${JSON.stringify(file)}`);
   };
-  const options = { url, output: directory, quality: 'best', playlist: true, resume: true };
+  const options = { url, output: directory, quality: 'best', playlist: true, resume: true, adaptiveConcurrency: false };
   try {
     const first = await download(options, { backendResolver, runner });
     assert.equal(first.saved, 2);
@@ -105,7 +105,8 @@ test('playlist failure preserves successes and resume downloads only the missing
     const second = await download(options, { backendResolver, runner });
     assert.equal(second.saved, 1);
     assert.equal(second.skipped, 2);
-    assert.deepEqual(attempted, [1, 2, 3, 2]);
+    assert.deepEqual(attempted.slice(0, 3).sort(), [1, 2, 3]);
+    assert.deepEqual(attempted.slice(3), [2]);
     assert.equal((await readdir(directory)).filter(name => name.startsWith('.veo-part')).length, 0);
     await rm(path.join(directory, 'Video 1.mp4'));
     const third = await download({ ...options, playlistItems: '1', skipExisting: true }, { backendResolver, runner });
@@ -139,7 +140,7 @@ test('cancelled jobs retain completed playlist outputs and retry unfinished work
   const stdout = sink(), stderr = sink(), controller = new AbortController();
   const jobFile = path.join(directory, 'job.json');
   try {
-    const code = await runJob({ urls: [url, `${url}/next`], output: directory, json: true, playlist: true }, {
+    const code = await runJob({ urls: [url, `${url}/next`], output: directory, json: true, playlist: true, concurrentDownloads: 1 }, {
       reporter: reporter(), stdout, stderr, jobFile, signal: controller.signal,
       download: async (_, { onEntry }) => {
         await onEntry({ index: 1, status: 'saved', files: ['first.mp4'] });

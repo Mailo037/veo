@@ -1,6 +1,6 @@
 {
   "name": "@mailo037/veo",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "A clean, simple video downloader powered by yt-dlp.",
   "type": "module",
   "bin": {
@@ -21,7 +21,8 @@
     "test:smoke": "node scripts/smoke.js",
     "test:open": "node scripts/smoke-open.js",
     "check:package": "node scripts/check-package.js",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test",
+    "test:workflows": "node scripts/smoke-workflows.js"
   },
   "keywords": [
     "cli",

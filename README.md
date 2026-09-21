@@ -54,8 +54,10 @@ Options:
   --audio                   Audio only (MP3 by default)
   --format <format>         Video: mp4, mkv, webm, mov
                             Audio: mp3, m4a, aac, opus, flac, wav
+  --recode                  Explicit video conversion (requires --format)
+  --playlist-concurrency <n> Parallel playlist entries, 1-4 (default: 2)
   --playlist                Download every entry of a playlist or channel URL
-  -N, --concurrent-fragments <n>   Parallel fragments, 1-16
+  -N, --concurrent-fragments <n>   Parallel fragments, 1-16 (default: 8)
   --subs                    Download subtitles (default languages: en)
   --sub-langs <langs>       Subtitle languages, e.g. "de,en" (implies --subs)
   --embed-subs              Embed subtitles into the video file
@@ -84,7 +86,7 @@ veo "https://youtube.com/watch?v=VIDEO_ID" -q 1080p
 veo "https://x.com/USER/status/STATUS_ID" -q best
 veo "https://example.com/video.mp4" --audio
 veo "https://example.com/video.mp4" --audio --format flac
-veo "https://example.com/video.mp4" --format webm -o ./videos
+veo "https://example.com/video.mp4" --format webm --recode -o ./videos
 veo "https://example.com/video.mp4" -r "My Video" --format mp4 --open
 veo "https://example.com/video.mp4" --audio -r "My Music"
 veo <url1> <url2> <url3> --embed-metadata --subs
@@ -95,14 +97,17 @@ npx @mailo037/veo "https://example.com/video.mp4" --output ./downloads
 
 ### Several URLs and playlists
 
-- Pass any number of URLs; they are downloaded one after another. A failure is reported
+Playlist downloads use two concurrent entries by default; use `--playlist-concurrency 1` for sequential downloads. Each entry uses up to eight concurrent DASH/HLS fragments by default (`-N 1` disables fragment parallelism). More connections help only when the source and connection have spare capacity. Video format changes preserve the encoded streams unless `--recode` is explicitly enabled; audio extraction and precise section cuts retain their existing conversion behavior.
+
+- Pass any number of URLs; up to two run concurrently by default. Use
+  `--concurrent-downloads 1` for sequential processing. A failure is reported
   with its URL and does not stop the remaining URLs; the exit status is `1` if anything
   failed.
 - Playlists, channels and other collections are refused by default with a hint. Add
   `--playlist` to download every entry. Each entry keeps its own title; `--rename` applies
   a name prefix per entry (`My Name - 001`), or substitutes each title with `movie_*`.
 - Use `--playlist-items 1,3-5` to select entries by their original, one-based index.
-  Playlists are processed one entry at a time: a failed entry does not discard successful
+  Playlist entries run with bounded parallelism: a failed entry does not discard successful
   files or stop the remaining entries. Before downloading, veo displays the selected count
   and a size estimate when the source supplies sizes. Unknown sizes are labeled explicitly;
   metadata estimates do not predict conversion size.
@@ -142,8 +147,77 @@ veo --retry-failed "C:\path\to\job.json"
 - `--quality` does not apply to audio.
 - MP4-compatible codecs are preferred at the selected resolution; merged video prefers MP4
   with MKV fallback. A single-file source may retain its original container. Use
-  `--format mp4` to explicitly require MP4 (conversion may be slow or lossy).
-- `--format` on video enables conversion when necessary. Audio formats require `--audio`.
+  `--format mp4` to require MP4 through lossless remuxing. Incompatible codecs cause an error.
+- `--format` on video remuxes without re-encoding. Add `--recode` to explicitly allow conversion, which may be slow or lossy. Audio formats require `--audio`.
+
+### Playback compatibility
+
+H.264/AAC sources are preferred at the selected quality, including explicit MP4 output.
+Original codecs are retained by default; a playback note identifies media needing extra
+player codecs. MP4 is a container, not a promise of a particular codec.
+
+Use `veo URL --compatible` to ensure MP4 with H.264 8-bit 4:2:0 and AAC.
+Already compatible streams are copied; only incompatible streams are encoded (H.264 CRF 18,
+AAC 192 kbit/s), which takes time and may lose quality. HDR requiring video conversion
+is refused rather than silently losing correct colors. Embedded subtitles/thumbnails are
+not supported in this mode; separate subtitle files remain supported.
+New configs include a `kompatibel` profile; existing configs receive a commented profile
+example through `veo config edit`. Enable it with `veo URL --profile kompatibel`.
+
+### Download controls and diagnostics
+
+- URL lists and batch files use `--concurrent-downloads 2` by default (range 1–4).
+  Each playlist independently uses `--playlist-concurrency 2` (range 1–4).
+  The limits multiply when several playlists run at once. JSON emits one complete
+  object per URL in completion order; the `url` field identifies each result.
+- Adaptive concurrency is on by default. After the backend's own retries are exhausted,
+  HTTP 429/5xx and temporary connection failures trigger at most two further attempts,
+  after 2 and 4 seconds. Fragment parallelism and future URL/playlist workers are reduced
+  for the rest of the run. Active downloads finish normally; format and quality stay fixed.
+  Partials are continued on retry. Use `--no-adaptive-concurrency` to disable this.
+- `--check-space` checks cache and destination free space before media transfer. Known
+  sizes include conservative room for merge output and a destination copy, plus space
+  reserved by concurrent downloads in the same process. Unknown sizes are reported as
+  unknown; conversion sizes and other processes' disk usage cannot be predicted exactly.
+  Use `--no-check-space` to disable this conservative check.
+- `--timings` shows elapsed time for setup, metadata, download/backend, processing,
+  saving and retry waits. Download/backend includes the backend's own startup and
+  extraction overhead; these are elapsed timings, not a diagnosis of network speed.
+  JSON results include `timings` in milliseconds, or `entryTimings` for playlists.
+  Use `--no-timings` to hide/omit them.
+- Terminal details are gray, titles bold, saves green and errors red. The same styling
+  applies to stats, history, runs/stop, doctor, flush, updates, config prose, help and
+  interactive prompts. For example, `veo stats --no-color` disables it for one command. Redirected output
+  and JSON have no color escapes. `--no-color`, `"color": false`, `NO_COLOR`,
+  and `TERM=dumb` disable colors.
+  This can be set independently per profile, for example
+  `"profiles": { "default": { "color": true }, "plain": { "color": false } }`.
+  Use `veo stats --profile plain` or `veo URL --profile plain`; `--color` or
+  `--no-color` overrides the profile for one invocation (except `NO_COLOR`).
+  External npm/editor output and Node runtime warnings keep their own formatting.
+
+### Filename templates and folders
+
+`--filename-template` controls the name without extension; `--folder-template`
+creates relative subfolders under `--output`. Both support `{title}`, `{id}`,
+`{channel}`, `{year}`, `{playlist}` and `{index}` (three-digit playlist index).
+Missing metadata uses readable fallbacks. `{year}` is the upload year when available.
+Subtitles follow the media name. Existing files are never overwritten. Templates cannot
+escape the output folder, and symlink/junction subfolders are refused. Use forward slashes
+for folders. `--rename` and `--filename-template` are mutually exclusive.
+
+```powershell
+veo "VIDEO-URL" --folder-template "{channel}/{year}" --filename-template "{title} - {id}"
+veo "PLAYLIST-URL" --playlist --folder-template "{playlist}" --filename-template "{index} - {title}"
+veo config check
+veo config check --profile fast
+veo config show --profile fast
+```
+
+Config checks validate every effective profile (or the selected one), including unknown
+settings, ranges and conflicting options. Show prints merged built-in, global and profile
+settings as JSON, with credential paths/browser profiles redacted. Neither command contacts
+video sites. All new options are also documented as commented examples in `veo config edit`.
 
 ### Files, names and resume
 
@@ -252,7 +326,8 @@ are not allowed.
 ```
 
 Supported keys: `output`, `quality`, `format`, `rename`, `audio`, `open`, `resume`,
-`closestQuality`, `cookies`, `cookiesFromBrowser`, `playlist`, `concurrentFragments`,
+`closestQuality`, `cookies`, `cookiesFromBrowser`, `playlist`, `concurrentFragments`, `playlistConcurrency`, `recode`, `compatible`, `concurrentDownloads`, `adaptiveConcurrency`,
+`filenameTemplate`, `folderTemplate`, `checkSpace`, `timings`, `color`,
 `subs`, `subLangs`, `embedSubs`, `embedMetadata`, `embedThumbnail`, `sponsorblockRemove`,
 `section`, `json`. An explicit command-line flag always wins over a stored default. An
 unknown key produces a warning; invalid JSON or a wrong value type is an error, because

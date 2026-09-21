@@ -190,6 +190,7 @@ export function readableError(error) {
   if (/unsupported url|no suitable extractor/i.test(text)) return 'This URL or website is not supported by the downloading backend.';
   if (/private|login required|sign in|log in|authentication|members.only|not a bot|cookies/i.test(text)) return 'This content is private or requires authentication. veo does not bypass access controls. If you are authorized to view it, pass your own session with --cookies <file> or --cookies-from-browser <browser>.';
   if (/deleted|removed|no longer available|404|not found|does not exist/i.test(text)) return 'The content was deleted, removed, or could not be found.';
+  if (/could not write header|only vp8 or vp9 or av1|not supported in container|could not find tag/i.test(text)) return 'The selected codecs do not fit this container. Try --format mkv for lossless output, or add --recode to explicitly convert (may lose quality).';
   if (/requested format|no video formats|no suitable formats|conversion failed|error opening encoder|could not find tag/i.test(text)) return 'The requested format is unavailable or could not be converted. Try -q best or another --format.';
   if (/drm.protected|digital rights/i.test(text)) return 'This content is DRM-protected. veo does not remove DRM.';
   if (/network|timed? ?out|connection|resolve|ENOTFOUND|ECONN|fetch failed|HTTP Error (403|429|5\d\d)/i.test(text)) return 'Network request failed or the site blocked the request. Check your connection and URL, then try again later.';

@@ -64,7 +64,16 @@ try {
   assert.equal(await run(process.execPath, [cli, url, '-r', 'My Video']), 0);
   assert.equal(await run(process.execPath, [cli, url, '-r', 'My Video']), 0);
   assert.equal(await run(process.execPath, [cli, url, '--audio', '--rename', 'My Music', '-o', './audio']), 0);
-  assert.equal(await run(process.execPath, [cli, url, '--format', 'webm', '-o', './converted']), 0);
+  assert.equal(await run(process.execPath, [cli, url, '--format', 'webm', '--recode', '-o', './converted']), 0);
+  assert.equal(await run(process.execPath, [cli, url, '--format', 'mkv', '-o', './remuxed']), 0);
+  const streamHashes = file => capture(ffmpeg, ['-v', 'error', '-i', file, '-map', '0', '-c', 'copy', '-f', 'streamhash', '-hash', 'sha256', '-']);
+  const originalHashes = await streamHashes(source);
+  const remuxedHashes = await streamHashes(path.join(root, 'remuxed', 'original-title.mkv'));
+  assert.equal(originalHashes.code, 0);
+  assert.equal(remuxedHashes.code, 0);
+  assert.equal(remuxedHashes.stdout, originalHashes.stdout, 'remux must preserve encoded video and audio packets');
+  const incompatible = await capture(process.execPath, [cli, url, '--format', 'webm', '-o', './incompatible']);
+  assert.equal(incompatible.code, 1, 'incompatible container must fail instead of silently re-encoding');
   assert.equal(await run(process.execPath, [cli, url.replace('original-title.mp4', 'deleted.mp4')]), 1);
 
   // Inspection modes must answer without writing anything.
@@ -98,7 +107,7 @@ try {
   await writeFile(list, `# Own generated videos\n${url}\n\n${url.replace('original-title.mp4', 'recover.mp4')}\n`);
   const fromList = await capture(process.execPath, [cli, '--batch-file', list, '--profile', 'small', '--json']);
   assert.equal(fromList.code, 1, fromList.stderr);
-  assert.deepEqual(fromList.stdout.trim().split('\n').map(line => JSON.parse(line).status), ['saved', 'failed']);
+  assert.deepEqual(fromList.stdout.trim().split('\n').map(line => JSON.parse(line).status).sort(), ['failed', 'saved']);
   const retryFile = fromList.stderr.match(/--retry-failed "([^"]+)"/)[1];
   recovered = true;
   const otherCwd = path.join(root, 'other-cwd');
