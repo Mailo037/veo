@@ -142,6 +142,10 @@ export async function configMain(args) {
   [args, stdout] = commandOutput(args, process.stdout);
   if (args[0] === 'show') stdout = process.stdout;
   const file = configFile();
+  if (args[0] === 'reset') {
+    if (args.length !== 1) throw new Error('Usage: veo config reset');
+    return (await import('./config-reset.js')).resetConfig(file, { output: stdout });
+  }
   if (['check', 'show'].includes(args[0])) {
     const { parseArgs } = await import('node:util');
     const { values, positionals } = parseArgs({ args: args.slice(1), allowPositionals: true, options: { profile: { type: 'string' } } });
@@ -161,7 +165,7 @@ export async function configMain(args) {
     }
     return 0;
   }
-  if (args.length !== 1 || !['edit', 'path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles');
+  if (args.length !== 1 || !['edit', 'path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles|check|show|reset');
   if (args[0] === 'path') { stdout.write(`${file}\n`); return 0; }
   if (args[0] === 'profiles') {
     const loaded = await loadConfig();

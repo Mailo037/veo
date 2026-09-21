@@ -63,7 +63,7 @@ Options:
   --skip-existing         Skip matching downloads still present on disk
   --no-<boolean-option>   Disable a stored boolean default, e.g. --no-open
   -v, --version            Show installed version (also: veo version)
-  -h, --help               Show help
+  -h, --help               Show help (also: veo help)
 
 Commands:
   veo update [--check]     Update veo itself with npm
@@ -75,7 +75,7 @@ Commands:
   veo runs [id]            List active runs, or show one run in detail
   veo stop [id]            Stop one run, or every active run
   veo version              Show the installed version
-  veo config edit|path|profiles|check|show  Manage defaults and named profiles
+  veo config edit|path|profiles|check|show|reset  Manage defaults and named profiles
 
 Run veo without arguments in a terminal for interactive setup.
 
@@ -191,6 +191,7 @@ export function cliOptions(config = {}) {
 }
 
 export function parseCli(args, { config = {} } = {}) {
+  if (args[0] === 'help') args = ['--help', ...args.slice(1)];
   if (args[0] === 'version') {
     if (args.length !== 1) throw new Error('Usage: veo version');
     return { version: true };
@@ -268,6 +269,7 @@ export function parseCli(args, { config = {} } = {}) {
 }
 
 export async function main(args = process.argv.slice(2), { config } = {}) {
+  if (args[0] === 'help') args = ['--help', ...args.slice(1)];
   let color = !args.includes('--no-color') && !args.includes('--json');
   let display;
   try {

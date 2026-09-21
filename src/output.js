@@ -35,6 +35,7 @@ export function formatOutput(text, stream, enabled = settings.getStore()?.enable
     if (/^Total failures:\s*[1-9]/.test(value)) role = 'error';
     if (/^[1-9]\d* problems? found/.test(value)) role = 'error';
     if (/^No problems found/.test(value)) role = 'success';
+    if (/^Config reset:/.test(value)) role = 'success';
     if (/^Summary:/.test(value)) role = /\b[1-9]\d* failed\b|cancelled/.test(value) ? 'error' : 'success';
     return styleText(stream, line, role, enabled);
   }).join('');

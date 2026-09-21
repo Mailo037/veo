@@ -400,6 +400,7 @@ paths and custom comments are preserved.
 veo version           # installed version (also: veo --version or veo -v)
 veo                   # interactive download wizard (terminal only)
 veo config edit       # create/open config, including example profiles
+veo config reset      # confirm with y; back up config and restore the current template
 veo config profiles   # list available profiles
 veo config path       # show the config file location
 veo doctor            # diagnose the local setup; exit 1 if a check fails

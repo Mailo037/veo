@@ -2,6 +2,12 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.6.1
+
+### Added
+
+- `veo config reset` restores the current template after confirmation and saves an exact backup of the previous configuration, including malformed files.
+
 ## 1.6.0
 
 ### Added

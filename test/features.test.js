@@ -151,7 +151,7 @@ test('parallel URL jobs serialize duplicates and retain per-item statistics and 
       download: async options => {
         assert.ok(!activeUrls.has(options.url), 'duplicates cannot share an active staging directory');
         activeUrls.add(options.url); active++; peak = Math.max(active, peak);
-        try { await sleep(20); if (options.url.endsWith('/fail')) throw new Error('failed'); return { files: [options.url], status: 'saved', saved: 1 }; }
+        try { await sleep(60); if (options.url.endsWith('/fail')) throw new Error('failed'); return { files: [options.url], status: 'saved', saved: 1 }; }
         finally { active--; activeUrls.delete(options.url); }
       },
     });
