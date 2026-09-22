@@ -1,6 +1,6 @@
 import { commandOutput } from './output.js';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { inspectBackend, findOnPath, resolveBackend, TERMUX_SETUP } from './backend.js';
 import { loadConfig } from './config.js';
@@ -21,8 +21,9 @@ Options:
   -h, --help            Show help
 
 Checks Node.js, the output directory, the backend cache, yt-dlp, FFmpeg/FFprobe,
-reachability of the registry and the yt-dlp release host, and leftover partial
-downloads. Downloads no backend and changes nothing but its own probe files and
+reachability of the registry and the yt-dlp release host, leftover partial
+downloads, and stale duplicate-detection records. Downloads no backend and
+changes nothing but its own probe files and
 the backend cache directory. The fix command restores managed tools (downloads
 yt-dlp if needed unless --offline), creates the requested output directory, and
 checks again. It does not change PATH, overrides or config values.
@@ -195,6 +196,26 @@ export async function collectChecks({
   const leftover = partials.filter(entry => entry.isDirectory() && entry.name.startsWith('.veo-') && entry.name !== '.veo-history').map(entry => entry.name);
   if (leftover.length) push('warn', 'Partial data', `${leftover.length} legacy folder${leftover.length === 1 ? '' : 's'} in the output directory (${leftover.slice(0, 3).join(', ')}${leftover.length > 3 ? ', …' : ''}). These are not migrated to the local cache; inspect them before removing them.`);
   else push('ok', 'Partial data', 'no leftover download folders');
+  const historyDir = path.join(target, '.veo-history');
+  const historyInfo = await stat(historyDir).catch(() => null);
+  if (!historyInfo) push('ok', 'Download history', 'no duplicate-detection records in the output directory');
+  else if (!historyInfo.isDirectory()) push('fail', 'Download history', `${historyDir} is not a directory — remove or rename it; downloads cannot save their duplicate-detection records otherwise`);
+  else {
+    const records = (await readdir(historyDir).catch(() => [])).filter(name => name.endsWith('.json'));
+    let stale = 0;
+    for (const name of records) {
+      let usable = false;
+      try {
+        const record = JSON.parse(await readFile(path.join(historyDir, name), 'utf8'));
+        usable = Boolean(record?.files?.length && record.files.every(file => typeof file === 'string' && path.dirname(file) === target)
+          && (await Promise.all(record.files.map(file => stat(file).then(info => info.isFile(), () => false)))).every(Boolean));
+      } catch { usable = false; }
+      if (!usable) stale++;
+    }
+    if (!records.length) push('ok', 'Download history', 'empty record folder; removed automatically on the next download into this folder');
+    else if (stale) push('warn', 'Download history', `${stale} of ${records.length} record${records.length === 1 ? '' : 's'} reference${records.length === 1 ? 's' : ''} missing files; removed automatically on the next download into this folder`);
+    else push('ok', 'Download history', `${records.length} record${records.length === 1 ? '' : 's'}, all files present`);
+  }
   const localDownloads = path.join(cacheBase({ env }), 'downloads');
   const cachedDownloads = await readdir(localDownloads, { withFileTypes: true }).catch(() => []);
   const count = cachedDownloads.filter(entry => entry.isDirectory() && /^\.veo-part-[a-f0-9]{24}$/.test(entry.name)).length;

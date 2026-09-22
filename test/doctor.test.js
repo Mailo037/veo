@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { collectChecks, doctorMain, findProbeVersion, formatReport, summarize, DOCTOR_HELP } from '../src/doctor.js';
@@ -149,6 +149,28 @@ test('network warnings never fail the run, and outdated versions warn', async ()
     assert.equal(summarize(checks).failed, 0);
     assert.ok(checks.some(check => check.label === 'veo version' && check.level === 'warn' && /2\.0\.0 is available/.test(check.detail)));
     assert.ok(checks.some(check => check.label === 'GitHub' && check.level === 'warn'));
+  } finally { await rm(dir.directory, { recursive: true, force: true }); }
+});
+
+test('stale download-history records warn, a stray history file fails', async () => {
+  const dir = await deps();
+  try {
+    assert.ok((await collectChecks(dir.options)).some(check => check.label === 'Download history' && check.level === 'ok'));
+    const historyDir = path.join(dir.directory, '.veo-history');
+    await mkdir(historyDir, { recursive: true });
+    assert.match((await collectChecks(dir.options)).find(check => check.label === 'Download history').detail, /empty record folder/);
+    await writeFile(path.join(historyDir, 'dead.json'), JSON.stringify({ version: 1, files: [path.join(dir.directory, 'gone.mp4')] }));
+    const live = path.join(dir.directory, 'kept.mp4');
+    await writeFile(live, 'x');
+    await writeFile(path.join(historyDir, 'live.json'), JSON.stringify({ version: 1, files: [live] }));
+    const checks = await collectChecks(dir.options);
+    const warned = checks.find(check => check.label === 'Download history');
+    assert.equal(warned.level, 'warn');
+    assert.match(warned.detail, /1 of 2 records reference missing files/);
+    assert.equal(summarize(checks).failed, 0);
+    await rm(historyDir, { recursive: true, force: true });
+    await writeFile(historyDir, 'not a directory');
+    assert.ok((await collectChecks(dir.options)).some(check => check.label === 'Download history' && check.level === 'fail'));
   } finally { await rm(dir.directory, { recursive: true, force: true }); }
 });
 

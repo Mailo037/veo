@@ -268,7 +268,9 @@ video sites. All new options are also documented as commented examples in `veo c
   `.veo-history` inside the output directory. `--skip-existing` uses these records and checks
   that the files still exist. A different quality/format or deleted output is downloaded
   again. Files downloaded before this history existed are not recognized automatically.
-  Deleting history removes duplicate detection, not downloaded media.
+  Deleting history removes duplicate detection, not downloaded media. Records whose files
+  no longer exist are removed on the next download into that folder, and `.veo-history`
+  itself is removed with its last record; `veo doctor` reports stale records.
 
 ### Metadata and subtitles
 
@@ -531,7 +533,7 @@ because a single stray file in the cache must never stop later runs.
 Prints one line per check: `ok`, `warn` or `fail`. It inspects Node.js, the platform, the
 output directory, the backend cache, yt-dlp (including the SHA-256 of the cached binary and
 the version it reports), FFmpeg/FFprobe, a system FFmpeg fallback, the config file, leftover
-partial downloads, the npm registry and the yt-dlp release host. It downloads no backend and
+partial downloads, stale duplicate-detection records, the npm registry and the yt-dlp release host. It downloads no backend and
 only creates its own probe files plus the backend cache directory. Exit status is `1` when
 at least one check fails.
 

@@ -4,7 +4,7 @@ import { mediaDestination, prepareDestination } from './naming.js';
 import { estimateMediaBytes, reserveSpace } from './disk-space.js';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { lstat, mkdir, open, readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rm, rmdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveBackend } from './backend.js';
 import { availableHeights, cappedHeight, closestHeight, saveUnique, sanitizeTitle } from './utils.js';
@@ -133,6 +133,23 @@ export function partialKey(metadata, url, options = {}) {
 function sourceKey(metadata, url) {
   return metadata.id && (metadata.extractor_key || metadata.extractor)
     ? `${metadata.extractor_key || metadata.extractor}:${metadata.id}` : `${url}#${metadata.id || ''}`;
+}
+
+// A history record can only skip a download while every file it names still
+// exists as a plain file inside the same output directory.
+export async function historyRecordUsable(record, directory) {
+  return Boolean(record?.files?.length && record.files.every(file => typeof file === 'string' && path.dirname(file) === directory)
+    && (await Promise.all(record.files.map(file => stat(file).then(info => info.isFile(), () => false)))).every(Boolean));
+}
+
+// Drops a duplicate-detection record whose files are gone and removes the
+// history folder with its last record, so deleting media leaves no stale
+// state behind. Returns whether the record is still usable.
+export async function pruneHistoryRecord(historyFile, directory, history) {
+  const usable = await historyRecordUsable(history, directory);
+  if (history && !usable) await rm(historyFile, { force: true }).catch(() => {});
+  if (!usable) await rmdir(path.dirname(historyFile)).catch(() => {});
+  return usable;
 }
 
 function downloadSettings(options) {
@@ -417,7 +434,7 @@ export async function download(options, { signal, reporter, backendResolver = re
   const key = partialKey(metadata, options.url, options);
   const historyFile = path.join(directory, '.veo-history', `${key}.json`);
   const history = options.skipExisting || (options.resume && options._entryIndex) ? await readJson(historyFile, null) : null;
-  if (history?.files?.length && history.files.every(file => typeof file === 'string' && path.dirname(file) === directory) && (await Promise.all(history.files.map(file => stat(file).then(info => info.isFile(), () => false)))).every(Boolean)) {
+  if (await pruneHistoryRecord(historyFile, directory, history)) {
     reporter?.status('Already downloaded; skipped.');
     return { url: options.url, title: metadata.title, files: [], status: 'skipped', saved: 0, skipped: 1, ...timingResult() };
   }

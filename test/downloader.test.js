@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { download as actualDownload, localRequestKey, findFinishedMedia, formatSelector, isSidecar, isStagedMedia, listFormats, partialKey, planDownload, predictedExtension, previewPath, runBackend, selectQuality, stagedTitle, stagingTemplate } from '../src/downloader.js';
+import { download as actualDownload, localRequestKey, findFinishedMedia, formatSelector, historyRecordUsable, isSidecar, isStagedMedia, listFormats, partialKey, planDownload, predictedExtension, previewPath, pruneHistoryRecord, runBackend, selectQuality, stagedTitle, stagingTemplate } from '../src/downloader.js';
 
 const download = (options, dependencies = {}) => actualDownload(options, { localRoot: options.output, ...dependencies });
 
@@ -200,6 +200,56 @@ test('a download resolves metadata, streams progress, and saves one file', async
     }
     assert.ok(calls[0].includes('--dump-single-json'));
     assert.ok(calls[1].includes('--no-overwrites'));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('dead history records are pruned and the folder goes with its last record', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-prune-'));
+  try {
+    const historyDir = path.join(directory, '.veo-history');
+    const deadFile = path.join(historyDir, 'dead.json');
+    const dead = { version: 1, files: [path.join(directory, 'gone.mp4')] };
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(deadFile, JSON.stringify(dead));
+    assert.equal(await pruneHistoryRecord(deadFile, directory, dead), false);
+    assert.deepEqual(await readdir(directory), []);
+    // A missing record is a no-op that still drops an empty folder.
+    await mkdir(historyDir, { recursive: true });
+    assert.equal(await pruneHistoryRecord(path.join(historyDir, 'missing.json'), directory, null), false);
+    assert.deepEqual(await readdir(directory), []);
+    // A live record survives, with its folder; other directories do not count.
+    const live = path.join(directory, 'kept.mp4');
+    await writeFile(live, 'x');
+    await mkdir(historyDir, { recursive: true });
+    const record = { version: 1, files: [live] };
+    const recordFile = path.join(historyDir, 'live.json');
+    await writeFile(recordFile, JSON.stringify(record));
+    assert.equal(await pruneHistoryRecord(recordFile, directory, record), true);
+    assert.equal(await historyRecordUsable(record, `${directory}-elsewhere`), false);
+    assert.deepEqual(await readdir(historyDir), ['live.json']);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+  // A stray file named .veo-history is left alone.
+  const blocked = await mkdtemp(path.join(os.tmpdir(), 'veo-prune-'));
+  try {
+    await writeFile(path.join(blocked, '.veo-history'), 'not a directory');
+    assert.equal(await pruneHistoryRecord(path.join(blocked, '.veo-history', 'x.json'), blocked, { version: 1, files: [path.join(blocked, 'gone.mp4')] }), false);
+    assert.equal(await readFile(path.join(blocked, '.veo-history'), 'utf8'), 'not a directory');
+  } finally { await rm(blocked, { recursive: true, force: true }); }
+});
+
+test('a deleted output loses its skip record and is downloaded again', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-prune-'));
+  const options = { url: URL, output: directory, quality: '720p', skipExisting: true };
+  try {
+    const { backendResolver, runner } = fakeBackend({ calls: [] });
+    const first = await download(options, { backendResolver, runner });
+    assert.equal(first.status, 'saved');
+    assert.equal((await download(options, { backendResolver, runner })).status, 'skipped');
+    await rm(first.files[0]);
+    const redownloaded = await download(options, { backendResolver, runner });
+    assert.equal(redownloaded.status, 'saved');
+    // The dead record was replaced, not accumulated.
+    assert.equal((await readdir(path.join(directory, '.veo-history'))).length, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

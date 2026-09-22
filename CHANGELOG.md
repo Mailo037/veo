@@ -2,6 +2,13 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.7.2
+
+### Fixed
+
+- Stale download-history records referencing deleted files are automatically pruned on subsequent downloads, and empty `.veo-history` directories are removed.
+- `veo doctor` inspects `.veo-history` records, reports stale duplicate-detection records as warnings, and flags damaged history directories.
+
 ## 1.7.1
 
 ### Fixed
