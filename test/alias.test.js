@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import {
   ALIAS_MARKER, addAlias, aliasMain, aliasStatus, listAliases, removeAlias, validateAliasName,
 } from '../src/alias.js';
@@ -52,6 +53,36 @@ test('add/remove/list round-trips a wrapper on this platform', async () => {
     assert.equal(removed.name, 'veo-test');
     assert.equal((await aliasStatus('veo-test', { binDir })).present, false);
     await assert.rejects(removeAlias('veo-test', { binDir }), /not installed/);
+  } finally { await rm(binDir, { recursive: true, force: true }); }
+});
+
+test('POSIX alias executes veo with literal arguments and uninstall -p removes it', { skip: process.platform === 'win32' }, async () => {
+  const binDir = await mkdtemp(path.join(os.tmpdir(), 'veo-alias-exec-'));
+  try {
+    const veo = path.join(binDir, 'veo');
+    await writeFile(veo, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    await chmod(veo, 0o755);
+    const out = output();
+    assert.equal(await aliasMain(['add', 'vo', '--bin-dir', binDir], { stdout: out }), 0);
+    const wrapper = path.join(binDir, 'vo');
+    const args = ['--json', 'file name', 'literal$(date)'];
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn(wrapper, args, {
+        shell: false, env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}` },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', chunk => { stdout += chunk; });
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', code => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(result.stdout.trimEnd().split('\n'), args);
+    const removed = output();
+    assert.equal(await uninstallMain(['-p', 'vo', '--bin-dir', binDir], { stdout: removed }), 0);
+    assert.match(removed.text(), /Alias removed: vo/);
+    assert.deepEqual(await readdir(binDir), ['veo']);
   } finally { await rm(binDir, { recursive: true, force: true }); }
 });
 
@@ -111,6 +142,9 @@ test('npm uninstall avoids shell and reports failures like update', () => {
   assert.equal(spec.command, 'cmd.exe');
   assert.deepEqual(spec.args, ['/d', '/s', '/c', 'npm uninstall -g veodl']);
   assert.equal(npmUninstallCommand({ platform: 'linux' }).command, 'npm');
+  assert.deepEqual(npmUninstallCommand({ platform: 'darwin' }), {
+    command: 'npm', args: ['uninstall', '-g', 'veodl'], shell: false,
+  });
 });
 
 test('uninstall -p removes one alias; bare uninstall plans without --yes', async () => {
@@ -133,6 +167,21 @@ test('uninstall -p removes one alias; bare uninstall plans without --yes', async
     assert.equal(JSON.parse(planned.text()).status, 'planned');
     await assert.rejects(uninstallMain(['-p', 'veo-short', '--keep-cache', '--bin-dir', binDir], { stdout: out, stderr: err }), /--keep-/);
   } finally { await rm(binDir, { recursive: true, force: true }); }
+});
+
+test('uninstall plans the active VEO_CONFIG path on macOS', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'veo-uninstall-macos-'));
+  try {
+    const config = path.join(root, 'custom-config.json');
+    await writeFile(config, '{}');
+    const out = output();
+    assert.equal(await uninstallMain(['--json', '--bin-dir', root], {
+      platform: 'darwin', env: { ...process.env, VEO_CONFIG: config }, stdout: out,
+      cacheRoot: path.join(root, 'cache'),
+    }), 0);
+    assert.equal(JSON.parse(out.text()).config, config);
+    assert.equal(await readFile(config, 'utf8'), '{}', 'planning must not delete config');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('uninstall --yes removes aliases, package, cache and config', async () => {
