@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { parseCli } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { download as actualDownload, localRequestKey, partialKey, planDownload } from '../src/downloader.js';
 import { interactiveArgs } from '../src/interactive.js';
-import { retryOptions, runJob } from '../src/jobs.js';
+import { latestFailedJob, retryOptions, runJob } from '../src/jobs.js';
+import { registerRun } from '../src/runs.js';
 import { createReporter } from '../src/progress.js';
 import { selectedEntries, sizeEstimate, validateItems } from '../src/playlist.js';
 
@@ -28,7 +29,7 @@ test('default profile applies automatically, explicit profiles replace it and fl
   assert.equal(music.audio, true);
   assert.equal(music.quality, 'best');
   assert.equal(music.open, true);
-  const answers = ['', url, 'video', 'n', '', '', 'y', 'y'];
+  const answers = ['', url, 'video', '', '', 'y', 'y'];
   const prompts = [];
   const args = await interactiveArgs(config, { output: sink(), ask: async prompt => { prompts.push(prompt); return answers.shift(); }, inspect: async () => ({ formats: [{ height: 720, vcodec: 'h264' }] }) });
   assert.match(prompts[0], /\[default\]/);
@@ -70,15 +71,54 @@ test('playlist ranges are bounded selections and report partial size estimates h
 
 test('interactive wizard offers source resolutions, returns valid flags and cancels cleanly', async () => {
   const output = sink();
-  const answers = [url, 'video', 'n', '999p', '720p', './downloads', 'y', 'y'];
+  const answers = [url, 'video', '999p', '720p', './downloads', 'y', 'y'];
   const args = await interactiveArgs({}, { output, ask: async () => answers.shift(), inspect: async () => ({ title: 'Test', formats: [{ height: 720, vcodec: 'h264' }] }) });
   const parsed = parseCli(args);
   assert.equal(parsed.quality, '720p');
   assert.equal(parsed.resume, true);
   assert.equal(parsed.skipExisting, true);
   assert.match(output.text, /Choose: best, 720p/);
-  const cancelAnswers = [url, 'audio', 'n', '', 'n', 'n'];
+  const cancelAnswers = [url, 'audio', '', 'n', 'n'];
   assert.equal(await interactiveArgs({}, { output, ask: async () => cancelAnswers.shift(), inspect: async () => ({ title: 'Test' }) }), null);
+});
+
+test('interactive wizard detects collections and uses profile playlist selection', async () => {
+  const prompts = [];
+  const config = { profiles: { default: { playlist: true, playlistItems: '2', audio: true } } };
+  const answers = ['', url, '', '', '', '', 'y', 'y'];
+  const args = await interactiveArgs(config, { output: sink(), ask: async prompt => { prompts.push(prompt); return answers.shift(); },
+    inspect: async options => {
+      assert.equal(options.playlist, true);
+      return { title: 'Collection', entries: [{ title: 'One' }, { title: 'Two' }] };
+    } });
+  const parsed = parseCli(args, { config });
+  assert.equal(parsed.playlist, true);
+  assert.equal(parsed.playlistItems, '2');
+  assert.equal(parsed.audio, true);
+  assert.match(prompts.find(prompt => prompt.startsWith('Download the playlist')), /\[y\]/);
+  assert.match(prompts.find(prompt => prompt.startsWith('Entries')), /Enter = 2/);
+});
+
+test('latest failed retry job skips newer successful and active jobs', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'veo-retry-last-'));
+  try {
+    const jobs = path.join(root, 'jobs');
+    await mkdir(jobs);
+    const name = stamp => `${stamp}-${'a'.repeat(36)}.json`;
+    const failed = path.join(jobs, name('1700000000001'));
+    const completed = path.join(jobs, name('1700000000002'));
+    const active = path.join(jobs, name('1700000000003'));
+    const options = { output: root };
+    await writeFile(failed, JSON.stringify({ version: 1, options, items: [{ status: 'failed', url }] }));
+    await writeFile(completed, JSON.stringify({ version: 1, options, items: [{ status: 'saved', url }] }));
+    await writeFile(active, JSON.stringify({ version: 1, options, items: [{ status: 'running', url }] }));
+    const run = await registerRun(() => {}, root);
+    try {
+      await run.describe({ job: active });
+      assert.equal(await latestFailedJob(root), failed);
+      assert.equal((await retryOptions(await latestFailedJob(root))).length, 1);
+    } finally { await run.unregister(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('playlist failure preserves successes and resume downloads only the missing entry', async () => {

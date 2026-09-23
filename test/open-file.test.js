@@ -15,7 +15,7 @@ test('--open combines with rename and audio without changing defaults', () => {
   assert.match(HELP, /--open/);
 });
 
-for (const [platform, command] of [['win32', 'explorer.exe'], ['linux', 'xdg-open'], ['darwin', 'open']]) {
+for (const [platform, command] of [['win32', 'explorer.exe'], ['linux', 'xdg-open'], ['darwin', 'open'], ['android', 'termux-open']]) {
   test(`${platform} opens one literal absolute filename without a shell`, async () => {
     let unreferenced = false;
     const filename = './My video & $(echo hello).mp4';

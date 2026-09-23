@@ -1,6 +1,6 @@
 {
   "name": "@mailo037/veo",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "description": "A clean, simple video downloader powered by yt-dlp.",
   "type": "module",
   "bin": {
@@ -9,6 +9,8 @@
   "files": [
     "bin/",
     "src/",
+    "docs/",
+    "AGENTS.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

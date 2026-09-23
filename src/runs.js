@@ -5,6 +5,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cacheBase } from './paths.js';
 import { writeJson } from './state.js';
+import { runArchiveFile } from './run-archive.js';
 import { cleanText, localStamp } from './utils.js';
 
 /**
@@ -22,12 +23,13 @@ const ITEM_STATUSES = new Set(['pending', 'running', 'saved', 'skipped', 'failed
 const SHOWN_ITEMS = 10;
 const OUTPUT_WIDTH = 42;
 
-export const RUNS_HELP = `veo runs [id]
+export const RUNS_HELP = `veo runs [id] [--json]
 
 List active veo runs with their 6-character id, process id, start time and progress.
 With an id, show one run in detail: URLs, media settings, output directory, job file
 and the state of every item. A run appears while it works and disappears when it
 finishes. Records of crashed runs are kept but marked stale.
+Use --json for machine-readable run metadata and per-item progress.
 Use veo stop <id> to stop one run.
 `;
 
@@ -111,7 +113,7 @@ export async function registerRun(cancel, root = cacheBase()) {
   let id = null;
   for (let attempt = 0; attempt < 20 && !id; attempt++) {
     const candidate = newRunId();
-    if (!taken.has(candidate)) id = candidate;
+    if (!taken.has(candidate) && !await exists(runArchiveFile(candidate, root))) id = candidate;
   }
   if (!id) throw new Error('Could not allocate a free run id. Remove stale run records with veo stop or veo flush.');
   const file = path.join(directory, `${randomUUID()}.json`);
@@ -254,17 +256,28 @@ export async function runsMain(args = [], { stdout = process.stdout, root = cach
     stdout.write(RUNS_HELP);
     return 0;
   }
-  if (args.length > 1) throw new Error('Usage: veo runs [id]');
+  const json = args.includes('--json');
+  args = args.filter(arg => arg !== '--json');
+  if (args.length > 1) throw new Error('Usage: veo runs [id] [--json]');
   const runs = await describeRuns(root);
   if (!args.length) {
-    stdout.write(formatRuns(runs));
+    if (json) stdout.write(`${JSON.stringify({ count: runs.length, runs: runs.map(publicRun) })}\n`);
+    else stdout.write(formatRuns(runs));
     return 0;
   }
   const id = normalizeId(args[0]);
   const run = runs.find(item => item.id === id);
   if (!run) throw new Error(`No veo run with id ${id} is active. List runs with veo runs.`);
-  stdout.write(formatRunDetails(run));
+  if (json) stdout.write(`${JSON.stringify(publicRun(run))}\n`);
+  else stdout.write(formatRunDetails(run));
   return 0;
+}
+
+function publicRun(run) {
+  return { id: run.id, pid: run.pid, state: run.alive ? 'running' : 'stale', startedAt: run.startedAt || null,
+    urls: Array.isArray(run.urls) ? run.urls : [], output: run.output || null, media: run.media || null,
+    quality: run.quality || null, format: run.format || null, playlist: Boolean(run.playlist), job: run.job || null,
+    progress: run.progress || null };
 }
 
 /**

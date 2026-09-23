@@ -1,6 +1,7 @@
 import { runPool, serialQueue, reducedLimit } from './execution.js';
 import { styleText } from './progress.js';
 import path from 'node:path';
+import { lstat, readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { cacheBase } from './paths.js';
 import { publicOptions, readJson, writeJson } from './state.js';
@@ -29,10 +30,32 @@ export function jobFilePath(root = cacheBase()) {
   return path.join(root, 'jobs', `${Date.now()}-${randomUUID()}.json`);
 }
 
-export async function runJob(options, { download, reporter, signal, openFile, stdout = process.stdout, stderr = process.stderr, jobFile, items, recordStats, recordHistory } = {}) {
+/** Find the newest retryable job, skipping finished jobs and active runs. */
+export async function latestFailedJob(root = cacheBase()) {
+  const directory = path.join(path.resolve(root), 'jobs');
+  const info = await lstat(directory).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (!info) throw new Error('No retry jobs found. Run a download first.');
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Invalid retry job directory: ${directory}`);
+  const { listRuns } = await import('./runs.js');
+  const active = new Set((await listRuns(root)).filter(run => run.alive && run.job).map(run => path.resolve(run.job)));
+  const names = (await readdir(directory, { withFileTypes: true }))
+    .filter(entry => entry.isFile() && /^\d{13}-[a-f0-9-]{36}\.json$/.test(entry.name))
+    .map(entry => entry.name).sort().reverse();
+  for (const name of names) {
+    const file = path.join(directory, name);
+    if (active.has(file)) continue;
+    const job = await readJson(file, null).catch(error => { if (error instanceof SyntaxError) return null; throw error; });
+    if (job?.version === 1 && job.options && typeof job.options === 'object' && !Array.isArray(job.options)
+      && Array.isArray(job.items) && job.items.every(item => item && typeof item.url === 'string' && typeof item.status === 'string')
+      && job.items.some(item => !['saved', 'skipped'].includes(item.status))) return file;
+  }
+  throw new Error('No failed or unfinished retry job found.');
+}
+
+export async function runJob(options, { download, reporter, signal, openFile, stdout = process.stdout, stderr = process.stderr, jobFile, items, recordStats, recordHistory, runId, archiveRoot } = {}) {
   const file = jobFile || jobFilePath();
   const requests = items || options.urls.map(url => ({ ...options, url }));
-  const job = { version: 1, options: publicOptions({ ...options, output: path.resolve(options.output) }),
+  const job = { version: 1, ...(runId ? { runId } : {}), startedAt: new Date().toISOString(), options: publicOptions({ ...options, output: path.resolve(options.output) }),
     items: requests.map(item => ({ url: item.url, status: 'pending', entries: [] })) };
   // Each retry item can have its own playlist selection.
   job.items.forEach((item, index) => { item.options = publicOptions(requests[index]); });
@@ -44,6 +67,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
   const activeTargets = new Map();
   const totals = { saved: 0, skipped: 0, failed: 0 };
   const adaptiveState = { divisor: 1 };
+  const archiveTools = runId ? await import('./run-archive.js') : null;
   const concurrency = options.concurrentDownloads ?? 2;
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error('Concurrent downloads must be between 1 and 4.');
   await runPool(requests, () => reducedLimit(concurrency, adaptiveState), async (request, index) => {
@@ -58,6 +82,14 @@ export async function runJob(options, { download, reporter, signal, openFile, st
       let saved = 0, skipped = 0, failed = 0;
       const itemReporter = concurrency > 1 && requests.length > 1 ? reporter.scoped?.(index + 1, requests.length, request.url) || reporter : reporter;
       const item = job.items[index];
+      const captureFiles = async files => {
+        if (!archiveTools) return;
+        item.fingerprints ||= {};
+        for (const target of files || []) {
+          if (!archiveTools.isMediaFile(target) || item.fingerprints[target]) continue;
+          item.fingerprints[target] = await archiveTools.fileFingerprint(target).catch(() => null);
+        }
+      };
       const started = performance.now();
       const published = new Set();
       let opened = false;
@@ -78,6 +110,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
         item.status = 'running';
         await persist();
         const result = await download(request, { reporter: itemReporter, signal, adaptiveState, skipCacheCleanup: true, onEntry: async entry => {
+          await captureFiles(entry.files);
           item.entries.push(entry);
           await persist();
           if (entry.status === 'saved') saved++;
@@ -85,6 +118,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
           if (entry.status === 'failed') failed++;
           await publish(entry.files || []);
         } });
+        await captureFiles(result.files);
         Object.assign(item, { status: result.status || 'saved', files: result.files, timings: result.timings, entryTimings: result.entryTimings, finished: true });
         title = result.title;
         if (!item.entries.length) {
@@ -92,14 +126,14 @@ export async function runJob(options, { download, reporter, signal, openFile, st
           skipped += result.skipped ?? 0;
           failed += result.failures?.length ?? (item.status === 'failed' ? 1 : 0);
         }
-        if (options.json) stdout.write(`${JSON.stringify({ ...result, status: item.status })}\n`);
+        if (options.json) stdout.write(`${JSON.stringify({ ...result, status: item.status, ...(runId ? { runId } : {}) })}\n`);
         await publish(result.files);
       } catch (error) {
         item.status = signal?.aborted ? 'cancelled' : 'failed';
         item.error = readableError(error);
         if (!signal?.aborted) failed++;
         item.files = item.entries.flatMap(entry => entry.files || []);
-        if (options.json) stdout.write(`${JSON.stringify({ url: request.url, status: item.status, error: item.error, files: item.files })}\n`);
+        if (options.json) stdout.write(`${JSON.stringify({ url: request.url, status: item.status, error: item.error, files: item.files, ...(runId ? { runId } : {}) })}\n`);
         else stderr.write(styleText(stderr, `veo: ${cleanText(request.url)}: ${item.error}`, 'error', options.color !== false) + '\n');
       }
       if (recordStats) {
@@ -114,7 +148,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
       // attempt that is still running.
       if (recordHistory) {
         try {
-          await recordHistory({ url: request.url, title, status: item.status, audio: Boolean(request.audio),
+          await recordHistory({ url: request.url, title, status: item.status, runId, job: ['failed', 'cancelled'].includes(item.status) ? file : null, audio: Boolean(request.audio),
             quality: request.quality, format: request.format, files: item.files || [], error: item.error,
             elapsedMs: Math.round(performance.now() - started) });
         } catch (error) { stderr.write(`veo: Could not save download history: ${readableError(error)}\n`); }
@@ -124,6 +158,12 @@ export async function runJob(options, { download, reporter, signal, openFile, st
     } finally { release(); if (activeTargets.get(targetKey) === current) activeTargets.delete(targetKey); }
   }, { signal }).catch(error => { if (!signal?.aborted) throw error; });
   const { saved, skipped, failed } = totals;
+  if (runId) {
+    try {
+      await archiveTools.archiveRun(job, { ...(archiveRoot ? { root: archiveRoot } : {}) });
+    } catch (error) { stderr.write(`veo: Could not archive run ${runId}: ${readableError(error)}\n`); }
+    stderr.write(`Run ID: ${runId}\n`);
+  }
   const unfinished = job.items.some(item => !['saved', 'skipped'].includes(item.status));
   stderr.write(styleText(stderr, `Summary: ${saved} saved, ${skipped} skipped, ${failed} failed${signal?.aborted ? ', cancelled' : ''}.`, unfinished ? 'error' : 'success', options.color !== false && !options.json) + '\n');
   if (unfinished) stderr.write(`Retry failed/unfinished downloads: veo --retry-failed "${file}"\n`);

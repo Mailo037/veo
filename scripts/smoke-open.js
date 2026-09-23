@@ -3,12 +3,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import ffmpeg from 'ffmpeg-static';
+import { exeSuffix, resolveMediaTools } from '../src/backend.js';
 
 const cli = fileURLToPath(new URL('../bin/veo.js', import.meta.url));
 const root = await mkdtemp(path.join(os.tmpdir(), 'veo-open-'));
@@ -36,6 +36,10 @@ function run(command, args, env = process.env) {
 }
 let server;
 try {
+  const toolCache = path.join(root, 'smoke-tools');
+  await mkdir(toolCache);
+  const mediaDirectory = await resolveMediaTools({ directory: toolCache, offline: true });
+  const ffmpeg = path.join(mediaDirectory, `ffmpeg${exeSuffix()}`);
   const source = path.join(root, 'fixture.mp4');
   assert.equal(await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=10', '-t', '1', '-c:v', 'libx264', source]), 0);
   const media = await readFile(source);
@@ -51,7 +55,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const original = cp.spawn;
 cp.spawn = function(command, args, options) {
-  if (['explorer.exe', 'open', 'xdg-open'].includes(command)) {
+  if (['explorer.exe', 'open', 'xdg-open', 'termux-open'].includes(command)) {
     // Verify the final file already exists when the real CLI asks to open it.
     const size = fs.statSync(args[0]).size;
     const child = original(process.execPath, ['-e', 'process.exit(0)'], options);
@@ -64,10 +68,13 @@ cp.spawn = function(command, args, options) {
 require('node:module').syncBuiltinESMExports();
 `);
   const url = `http://127.0.0.1:${server.address().port}/video.mp4`;
+  const env = { ...process.env, VEO_OPEN_TEST_LOG: log,
+    VEO_CONFIG: path.join(root, 'missing-config.json'), VEO_NO_UPDATE_CHECK: '1',
+    LOCALAPPDATA: root, XDG_CACHE_HOME: root };
   console.log('Testing CLI: veo <local-video> -r "My Video" --open');
-  assert.equal(await run(process.execPath, ['--require', hook, cli, url, '-r', 'My Video', '--open'], { ...process.env, VEO_OPEN_TEST_LOG: log }), 0);
+  assert.equal(await run(process.execPath, ['--require', hook, cli, url, '-r', 'My Video', '--open'], env), 0);
   const launch = JSON.parse(await readFile(log, 'utf8'));
-  assert.equal(launch.command, process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open');
+  assert.equal(launch.command, process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : process.platform === 'android' ? 'termux-open' : 'xdg-open');
   assert.deepEqual(launch.args, [path.join(root, 'My Video.mp4')]);
   assert.equal(launch.options.shell, false);
   assert.equal(launch.options.detached, true);

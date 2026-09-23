@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import ffmpeg from 'ffmpeg-static';
+import { exeSuffix, resolveMediaTools } from '../src/backend.js';
 
 const cli = fileURLToPath(new URL('../bin/veo.js', import.meta.url));
 const root = await mkdtemp(path.join(os.tmpdir(), 'veo-smoke-'));
@@ -39,6 +39,10 @@ let server;
 let recovered = false;
 let requests = 0;
 try {
+  const toolCache = path.join(root, 'smoke-tools');
+  await mkdir(toolCache);
+  const mediaDirectory = await resolveMediaTools({ directory: toolCache, offline: true });
+  const ffmpeg = path.join(mediaDirectory, `ffmpeg${exeSuffix()}`);
   const source = path.join(root, 'fixture.mp4');
   assert.equal(await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=640x360:r=24', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '2', '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', source]), 0);
   const media = await readFile(source);
@@ -122,7 +126,7 @@ try {
   assert.equal(JSON.parse(skipped.stdout.trim()).status, 'skipped');
 
   // `veo history` reports the attempts of the real runs above, newest first.
-  const history = await capture(process.execPath, [cli, 'history', '--json']);
+  const history = await capture(process.execPath, [cli, 'history', '--json', '--limit', '100']);
   assert.equal(history.code, 0, history.stderr);
   const recorded = JSON.parse(history.stdout);
   assert(recorded.count > 0, 'a run must leave history');

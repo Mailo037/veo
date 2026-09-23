@@ -48,6 +48,17 @@ test('adaptive retries are bounded, cancellable and do not retry permanent failu
   attempts = 0;
   await assert.rejects(adaptiveRun(() => { attempts++; throw new Error('HTTP 404'); }), /404/);
   assert.equal(attempts, 1);
+  // A failed concurrent fragment fetch surfaces as a local ENOENT on the
+  // fragment temp file; it retries with reduced parallelism like busy sources,
+  // while other "Unable to download video" failures still fail fast.
+  attempts = 0;
+  assert.equal(await adaptiveRun(async () => { if (++attempts < 3) throw new Error(`ERROR: Unable to download video: [Errno 2] No such file or directory: 'media.mp4.part-Frag${attempts}'`); return 'done'; }, {
+    state: { divisor: 1 }, wait: async () => {},
+  }), 'done');
+  assert.equal(attempts, 3);
+  attempts = 0;
+  await assert.rejects(adaptiveRun(() => { attempts++; throw new Error('ERROR: Private video'); }, { wait: async () => {} }), /Private video/);
+  assert.equal(attempts, 1);
   const controller = new AbortController();
   await assert.rejects(adaptiveRun(() => { throw new Error('ETIMEDOUT'); }, {
     signal: controller.signal, wait: async () => { controller.abort(); controller.signal.throwIfAborted(); },

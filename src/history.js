@@ -18,12 +18,14 @@ const MAX_FILES = 200;
 const STATUSES = new Set(['saved', 'skipped', 'failed', 'cancelled']);
 const NAME = /^(\d{13})-[a-f0-9-]{36}\.json$/;
 
-export const HISTORY_HELP = `veo history [--json]
+export const HISTORY_HELP = `veo history [--json] [--limit <n>] [--failed]
 
-Show the last ${HISTORY_LIMIT} download attempts, newest first, with title, status, media
+Show the last ${HISTORY_LIMIT} download attempts by default, newest first, with title, status, media
 type, date, URL and saved files. Saved, skipped, failed and cancelled items are
 recorded; playlist entries and retried attempts count individually.
-Use veo history --json for scripting. History is kept in the per-user veo cache
+Use --limit to show 1-1000 attempts, and --failed to show only failed or cancelled
+attempts. Use --json for scripting. Failed entries show their retry command while
+the job file is available. History is kept in the per-user veo cache
 and survives veo flush. Active downloads appear once they finish.
 `;
 
@@ -40,6 +42,8 @@ function valid(record) {
     && STATUSES.has(record.status)
     && ['video', 'audio'].includes(record.media)
     && [record.quality, record.format, record.error].every(value => value === null || typeof value === 'string')
+    && (record.job === undefined || record.job === null || typeof record.job === 'string')
+    && (record.runId === undefined || record.runId === null || /^[0-9a-z]{6}$/.test(record.runId))
     && Array.isArray(record.files) && record.files.every(file => typeof file === 'string' && Boolean(file));
 }
 
@@ -75,6 +79,8 @@ export function createHistoryRecorder(root = cacheBase(), { now = Date.now } = {
       format: text(item.format) || (audio ? 'mp3' : null),
       files: (Array.isArray(item.files) ? item.files : []).slice(0, MAX_FILES).map(file => text(file)).filter(Boolean),
       error: text(item.error, 400) || null,
+      ...(item.job ? { job: text(item.job) } : {}),
+      ...(item.runId ? { runId: text(item.runId) } : {}),
       elapsedMs: Number.isFinite(item.elapsedMs) && item.elapsedMs >= 0 ? Math.round(item.elapsedMs) : 0,
     };
     await writeJson(path.join(directory, `${at}-${randomUUID()}.json`), record);
@@ -82,7 +88,7 @@ export function createHistoryRecorder(root = cacheBase(), { now = Date.now } = {
 }
 
 /** The newest `limit` records, newest first. Missing history is not an error. */
-export async function readHistory(root = cacheBase(), limit = HISTORY_LIMIT) {
+export async function readHistory(root = cacheBase(), limit = HISTORY_LIMIT, { failed = false } = {}) {
   const directory = historyRoot(root);
   const info = await lstat(directory).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (!info) return [];
@@ -97,6 +103,7 @@ export async function readHistory(root = cacheBase(), limit = HISTORY_LIMIT) {
     const file = path.join(directory, name);
     const record = await readJson(file, null);
     if (!valid(record)) throw new Error(`Invalid history file: ${file}`);
+    if (failed && !['failed', 'cancelled'].includes(record.status)) continue;
     records.push(record);
   }
   return records;
@@ -114,16 +121,18 @@ function describeMedia(entry) {
   return detail ? `${entry.media}, ${detail}` : entry.media;
 }
 
-export function formatHistory(entries, limit = HISTORY_LIMIT) {
-  if (!entries.length) return 'veo history\n\nNo downloads recorded yet. Download something with veo first.\n';
-  const lines = [`veo history (last ${limit}, newest first)`, ''];
+export function formatHistory(entries, limit = HISTORY_LIMIT, { failed = false } = {}) {
+  if (!entries.length) return failed ? 'veo history\n\nNo failed or cancelled downloads recorded.\n' : 'veo history\n\nNo downloads recorded yet. Download something with veo first.\n';
+  const lines = [`veo history (last ${limit}${failed ? ' failed/cancelled' : ''}, newest first)`, ''];
   for (const [index, entry] of entries.entries()) {
     lines.push(`${index + 1}. ${entry.title}`);
     lines.push(`   Status: ${entry.status}${entry.status === 'skipped' ? ' (already on disk)' : ''}`);
+    if (entry.runId) lines.push(`   Run ID: ${entry.runId}  (veo inspect run ${entry.runId})`);
     lines.push(`   Media:  ${describeMedia(entry)}`);
     lines.push(`   Date:   ${localStamp(entry.at)}${entry.elapsedMs ? ` (${describeDuration(entry.elapsedMs)})` : ''}`);
     lines.push(`   URL:    ${entry.url}`);
     if (entry.error) lines.push(`   Error:  ${entry.error}`);
+    if (entry.job) lines.push(`   Retry:  veo --retry-failed "${entry.job}"`);
     for (const [position, file] of entry.files.slice(0, SHOWN_FILES).entries()) {
       lines.push(`${position ? '           ' : '   Saved:  '}${file}`);
     }
@@ -139,9 +148,26 @@ export async function historyMain(args = [], { stdout = process.stdout, root = c
     stdout.write(HISTORY_HELP);
     return 0;
   }
-  if (args.length && (args.length !== 1 || args[0] !== '--json')) throw new Error('Usage: veo history [--json]');
-  const entries = await readHistory(root, limit);
-  if (args[0] === '--json') stdout.write(`${JSON.stringify({ count: entries.length, entries })}\n`);
-  else stdout.write(formatHistory(entries, limit));
+  let json = false, failed = false;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--json' && !json) json = true;
+    else if (arg === '--failed' && !failed) failed = true;
+    else if (arg === '--limit') {
+      const value = args[++index];
+      if (!value || !/^[1-9]\d*$/.test(value) || Number(value) > 1000) throw new Error('--limit must be a whole number between 1 and 1000.');
+      limit = Number(value);
+    } else throw new Error('Usage: veo history [--json] [--limit <n>] [--failed]');
+  }
+  const entries = await readHistory(root, limit, { failed });
+  if (json) stdout.write(`${JSON.stringify({ count: entries.length, entries })}\n`);
+  else {
+    const visible = await Promise.all(entries.map(async entry => {
+      if (!entry.job) return entry;
+      const info = await lstat(entry.job).catch(() => null);
+      return info?.isFile() && !info.isSymbolicLink() ? entry : { ...entry, job: null };
+    }));
+    stdout.write(formatHistory(visible, limit, { failed }));
+  }
   return 0;
 }

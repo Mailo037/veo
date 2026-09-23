@@ -26,8 +26,14 @@ export function serialQueue() {
 }
 
 export const reducedLimit = (limit, state) => Math.max(1, Math.floor(limit / (state?.divisor || 1)));
+// yt-dlp reports a failed concurrent fragment fetch as a local ENOENT on the
+// fragment temp file (e.g. "...media.mp4.part-Frag29"), hiding the server-side
+// hiccup or expired segment URL behind it. Those are worth retrying with
+// reduced fragment parallelism and a refetched playlist; anything else yt-dlp
+// reports as "Unable to download video" (unavailable, private, ...) still
+// fails fast so permanent failures do not burn repeated full downloads.
 export function retryable(error) {
-  return /HTTP(?: Error)?\s*(?:429|5\d\d)|too many requests|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|temporary failure|connection (?:reset|aborted)/i.test(error?.message || '');
+  return /HTTP(?: Error)?\s*(?:429|5\d\d)|too many requests|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|temporary failure|connection (?:reset|aborted)|\.part-Frag\d+/i.test(error?.message || '');
 }
 
 export async function adaptiveRun(run, { enabled = true, state = { divisor: 1 }, signal, reporter, wait = delay, timer } = {}) {

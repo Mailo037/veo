@@ -83,6 +83,15 @@ test('veo runs lists active runs with progress and shows one run in detail', asy
     assert.match(detail.read(), / {2}3\. pending {2}https:\/\/example\.test\/three/);
     assert.match(detail.read(), new RegExp(`Stop:    veo stop ${run.id}`));
 
+    const json = sink();
+    assert.equal(await runsMain([run.id, '--json'], { root, stdout: json.stdout }), 0);
+    const metadata = JSON.parse(json.read());
+    assert.equal(metadata.id, run.id);
+    assert.equal(metadata.state, 'running');
+    assert.equal(metadata.progress.counts.total, 3);
+    assert.equal(metadata.progress.items[0].files[0], path.join(root, 'one.mp4'));
+    assert.equal(Object.hasOwn(metadata, 'file'), false, 'internal run record path stays private');
+
     // An upper-case id is normalized, an unknown or malformed id is refused.
     const upper = sink();
     assert.equal(await runsMain([run.id.toUpperCase()], { root, stdout: upper.stdout }), 0);

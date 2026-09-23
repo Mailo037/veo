@@ -69,6 +69,8 @@ test('static tools are only required where ffprobe-static does not abort the pro
     ['linux', 'arm64', true],
     ['darwin', 'arm64', true],
     ['darwin', 'ia32', false],
+    ['linux', 'riscv64', false],
+    ['win32', 'mips', false],
     ['freebsd', 'x64', false],
   ]) assert.equal(staticToolsSupported(platform, arch), expected, `${platform}/${arch}`);
 });

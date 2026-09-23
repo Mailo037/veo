@@ -72,13 +72,18 @@ Commands:
   veo flush                Stop veo runs and clear temporary downloads and jobs
   veo stats                Show persistent download statistics
   veo history              Show the last 5 downloads (--json for scripting)
-  veo runs [id]            List active runs, or show one run in detail
+  veo retry --last         Retry the newest failed or unfinished job
+  veo history --failed --limit 20  Filter and extend download history
+  veo runs [id]            List active runs; add --json for metadata and progress
+  veo inspect <file>        Read media metadata; --check-audio measures audio signal
+  veo inspect run <id>     Inspect saved files from a finished run by its id
   veo stop [id]            Stop one run, or every active run
   veo version              Show the installed version
   veo config edit|path|profiles|check|show|reset  Manage defaults and named profiles
   veo config edit [--external|--terminal]      Choose the configuration editor
 
 Run veo without arguments in a terminal for interactive setup.
+Agent workflow: see docs/AGENT_GUIDE.md in the repository or installed package.
 
 Defaults can be stored in the veo config file; veo doctor prints its location.
 
@@ -286,7 +291,7 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     }
     // The command's own validation reports configuration errors.
   }
-  if (['stats', 'history', 'flush', 'runs', 'stop', 'update', 'upgrade', 'check', 'doctor', 'backend'].includes(args[0])) args = display.remaining;
+  if (['stats', 'history', 'flush', 'runs', 'inspect', 'stop', 'update', 'upgrade', 'check', 'doctor', 'backend'].includes(args[0])) args = display.remaining;
   return withOutputSettings(color, () => runMain(args, { config }));
 }
 
@@ -309,9 +314,23 @@ async function runMain(args, { config }) {
     try { return await (await import('./runs.js')).runsMain(args.slice(1)); }
     catch (error) { stderr.write(`veo: ${readableError(error)}\n`); return 1; }
   }
+  if (args[0] === 'inspect') {
+    try { return await (await import('./inspect-media.js')).inspectMain(args.slice(1)); }
+    catch (error) { stderr.write(`veo: ${readableError(error)}\n`); return error.name === 'AbortError' ? 130 : 1; }
+  }
   if (args[0] === 'stop') {
     try { return await (await import('./runs.js')).stopMain(args.slice(1)); }
     catch (error) { stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
+  if (args[0] === 'retry') {
+    if (args[1] !== '--last') {
+      stderr.write('veo: Usage: veo retry --last [download options]\n');
+      return 1;
+    }
+    try {
+      const { latestFailedJob } = await import('./jobs.js');
+      args = ['--retry-failed', await latestFailedJob(), ...args.slice(2)];
+    } catch (error) { stderr.write(`veo: ${readableError(error)}\n`); return 1; }
   }
   const { cleanupDownloadCache } = await import('./download-cache.js');
   await cleanupDownloadCache().catch(error => stderr.write(`veo: Could not clean expired local downloads: ${readableError(error)}\n`));
@@ -418,7 +437,7 @@ async function runMain(args, { config }) {
     const { download } = await import('./downloader.js');
     const { createStatsRecorder } = await import('./stats.js');
     const { createHistoryRecorder } = await import('./history.js');
-    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, jobFile: jobFile || undefined, recordStats: createStatsRecorder(), recordHistory: createHistoryRecorder() });
+    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, jobFile: jobFile || undefined, runId: run?.id, recordStats: createStatsRecorder(), recordHistory: createHistoryRecorder() });
     if (result !== 0) return result;
     const notice = await maybeUpdateNotice({ currentVersion: await packageVersion() });
     if (notice) stderr.write(`${notice}\n`);

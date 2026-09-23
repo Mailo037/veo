@@ -124,8 +124,10 @@ export function exeSuffix(platform = process.platform) {
 // ffprobe-static terminates the whole process for platforms it does not know,
 // so the static packages may only be required for combos it handles.
 export function staticToolsSupported(platform = process.platform, arch = process.arch) {
-  if (!['win32', 'darwin', 'linux'].includes(platform)) return false;
-  return platform !== 'darwin' || ['x64', 'arm64'].includes(arch);
+  if (platform === 'win32') return ['x64', 'ia32', 'arm64'].includes(arch);
+  if (platform === 'darwin') return ['x64', 'arm64'].includes(arch);
+  if (platform === 'linux') return ['x64', 'ia32', 'arm', 'arm64'].includes(arch);
+  return false;
 }
 
 async function isExecutable(file) {

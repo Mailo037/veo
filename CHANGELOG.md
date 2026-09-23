@@ -2,6 +2,17 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.8.0
+
+### Added
+
+- **`veo inspect <file>` and `veo inspect run <id>`**: Inspect local container and stream metadata with `--json`. Add `--check-audio` to decode audio tracks and verify signals above -60 dBFS. `veo inspect run <id>` locates saved run files by file identity, size, and sampled SHA-256 fingerprint, even after renames or moves (`--search <directory>`).
+- **`veo retry --last`**: Automatically retry the most recent failed or unfinished job without manually locating its job file.
+- **`veo history` improvements**: Added `--limit <1-1000>` to customize history entries and `--failed` to view only failed or cancelled attempts with their retry command and persistent `runId`.
+- **Config editor clipboard & mouse scrolling**: Added native system clipboard copy/paste (Ctrl+C / Ctrl+V) across Windows, macOS, Linux (Wayland/X11), and Termux, as well as mouse wheel and Ctrl+Up/Down scrolling.
+- **Termux desktop opener**: Supported `--open` in Android/Termux using `termux-open`.
+- **Agent guidelines**: Included AGENTS.md and docs/AGENT_GUIDE.md in the distributed package.
+
 ## 1.7.2
 
 ### Fixed

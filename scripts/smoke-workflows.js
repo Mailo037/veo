@@ -6,10 +6,10 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import ffmpeg from 'ffmpeg-static';
 import { resolveBackend } from '../src/backend.js';
 
 const backend = await resolveBackend();
+const ffmpeg = path.join(backend.ffmpegLocation, `ffmpeg${process.platform === 'win32' ? '.exe' : ''}`);
 const root = await mkdtemp(path.join(os.tmpdir(), 'veo-feature-smoke-'));
 const cli = fileURLToPath(new URL('../bin/veo.js', import.meta.url));
 const env = { ...process.env, VEO_CONFIG: path.join(root, 'config.json'), LOCALAPPDATA: root,
@@ -39,7 +39,7 @@ try {
       active--;
       response.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': media.length });
       response.end(request.method === 'HEAD' ? undefined : media);
-    }, 250);
+    }, 450);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;

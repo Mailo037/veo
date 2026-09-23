@@ -18,7 +18,7 @@ test('veo history shows only the newest five downloads, newest first', async () 
     const record = createHistoryRecorder(root, { now: () => (clock += 1000) });
     const file = index => `C:/Videos/Video ${index}.mp4`;
     for (let index = 1; index <= 7; index++) {
-      await record({ url: `https://example.test/v${index}`, title: `Video ${index}`, status: 'saved', quality: '1080p', files: [file(index)], elapsedMs: 1500 });
+      await record({ url: `https://example.test/v${index}`, title: `Video ${index}`, status: index === 2 ? 'failed' : 'saved', quality: '1080p', files: [file(index)], elapsedMs: 1500 });
     }
     assert.equal((await readHistory(root, 100)).length, 7);
 
@@ -43,6 +43,13 @@ test('veo history shows only the newest five downloads, newest first', async () 
     assert.match(text.read(), new RegExp(`Saved:  ${escape(file(7))}`));
     assert.match(text.read(), /5\. Video 3/);
     assert.ok(!text.read().includes('Video 2'), 'older downloads must not be listed');
+
+    const longer = sink();
+    await historyMain(['--limit', '7'], { root, stdout: longer.stdout });
+    assert.match(longer.read(), /7\. Video 1/);
+    const failed = sink();
+    await historyMain(['--json', '--failed', '--limit', '1'], { root, stdout: failed.stdout });
+    assert.deepEqual(JSON.parse(failed.read()).entries.map(entry => entry.title), ['Video 2']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -61,8 +68,11 @@ test('veo history help, empty history and usage errors', async () => {
     assert.equal(await historyMain([], { root, stdout: text.stdout }), 0);
     assert.match(text.read(), /No downloads recorded yet/);
 
-    for (const args of [['--limit', '2'], ['--json', '--json'], ['--json=1'], ['5']]) {
+    for (const args of [['--json', '--json'], ['--json=1'], ['5']]) {
       await assert.rejects(historyMain(args, { root, stdout: sink().stdout }), /Usage: veo history \[--json\]/);
+    }
+    for (const args of [['--limit'], ['--limit', '0'], ['--limit', '1001'], ['--limit', '1.5']]) {
+      await assert.rejects(historyMain(args, { root, stdout: sink().stdout }), /--limit must be/);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -106,6 +116,10 @@ test('runJob records every finished item once, with its own outcome', async () =
     assert.equal(failed.url, 'https://example.test/fail');
     assert.equal(failed.media, 'video');
     assert.match(failed.error, /format is unavailable/);
+    assert.equal(failed.job, path.join(root, 'fail.json'));
+    const display = sink();
+    await historyMain(['--failed'], { root, stdout: display.stdout });
+    assert.match(display.read(), /Retry:  veo --retry-failed/);
     assert.deepEqual(failed.files, []);
     assert.equal(song.media, 'audio');
     assert.equal(song.quality, null);

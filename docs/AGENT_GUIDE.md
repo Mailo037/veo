@@ -1,0 +1,66 @@
+# veo for agents
+
+veo is a command-line video downloader. Use it only for content the user is authorized to download. This guide covers the stable command flow and the difference between download state, media tracks and measured audio signal.
+
+## Fast path
+
+```sh
+veo "https://example.com/video" --dry-run --json
+veo "https://example.com/video" --json --output ./downloads
+veo inspect "./downloads/video.mp4" --check-audio --json
+```
+
+Set `VEO_NO_UPDATE_CHECK=1` when a background update notice would distract a script. Use an explicit output directory to avoid depending on the agent's current working directory. `--dry-run` plans the download without saving media. It can still inspect the source and prepare backend tools on first use.
+
+## Output and failures
+
+Download commands write **one JSON object per URL** to stdout with `--json`. Several URLs produce newline-delimited JSON, not a JSON array. Progress, summaries and errors go to stderr. A failed item can still contain saved files, especially within a playlist.
+
+Example success:
+
+```json
+{"url":"https://example.com/video","status":"saved","title":"Example","files":["/downloads/Example.mp4"],"runId":"abc123"}
+```
+
+Example failure:
+
+```json
+{"url":"https://example.com/video","status":"failed","error":"HTTP Error 429","files":[]}
+```
+
+These are abbreviated examples; fields such as timing and playlist counts may also be present. Exit code `0` means the command succeeded, `1` means at least one item failed, and `130` means cancellation. Validate both the exit code and each result's `status`; a command can fail before producing any stdout JSON. Never infer success from the presence of a file path alone.
+
+## Inspect runs and results
+
+```sh
+veo runs --json
+veo runs k3f9qa --json
+veo history --failed --limit 20 --json
+veo retry --last --json
+```
+
+`runs` reports **active** runs, including their ID, state, options, job path and per-item progress. Completed runs disappear from this list. Download JSON and `history` retain the `runId`. `history` reports finished attempts with their outcome and saved file paths. A failed history entry may contain a `job` path, which can be passed to `veo --retry-failed "<job-path>"`; `veo retry --last` finds the newest retryable job automatically. Running jobs are excluded from `retry --last`.
+
+## Inspect saved media and audio
+
+```sh
+veo inspect "/downloads/Example.mp4" --json
+veo inspect "/downloads/Example.mp4" --check-audio --json
+veo inspect run abc123 --check-audio --json
+veo inspect run abc123 --search "/moved/videos" --json
+```
+
+`inspect` uses local FFprobe/FFmpeg and never downloads a URL. Its JSON contains `format`, `durationSeconds`, `sizeBytes`, `streams`, `hasAudioTrack` and `hasVideoTrack`. Without `--check-audio`, `audioCheck` is `null`.
+
+With `--check-audio`, veo decodes every audio track from start to end. `audioCheck.hasSignal` is true when at least one track's peak exceeds **−60 dBFS**. `audioCheck.tracks` lists each track's `streamIndex`, `maxDbfs` and `hasSignal`; digital silence may have `maxDbfs: null` or a very low level after conversion. A present audio track does not prove audible content. This is a signal-level check, not a listening or speech-quality test. Decoding long media can take time; if FFmpeg fails, the command exits nonzero instead of reporting silence.
+
+`inspect run` reads the saved run record even after the download finishes. It checks whether each file still exists **before** probing it. If a media file was renamed, veo searches the original output tree using file identity, size and a three-part SHA-256 fingerprint. `--search` adds one more directory after a move. Missing or ambiguous matches are reported without probing a different file; missing files make the command exit with code `1`. The fingerprint lives in veo's run history, so this works across media formats without rewriting the media. Runs created before this feature do not have a persistent run record.
+
+The run record is stored in veo's per-user cache on the device that ran the download. `inspect` works on Windows, macOS, Linux and Termux with locally available FFmpeg/FFprobe; set `VEO_FFMPEG_PATH` to their directory when they are not on the normal search path. Moving only the media to another device does not transfer the run record.
+
+## Operational notes
+
+- Run `veo doctor --offline` to check the local setup without network repair. `veo doctor fix` may install missing tools.
+- Use `--resume` for interrupted downloads and `--skip-existing` when repeated saves should be avoided.
+- `veo flush` removes temporary downloads and retry jobs; do not run it as routine maintenance in an agent workflow.
+- Do not call bare `veo` in an interactive terminal from automation: it opens a wizard. Use explicit URLs and flags.

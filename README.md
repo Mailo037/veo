@@ -2,6 +2,8 @@
 
 A small, clean video-downloading CLI powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp). No banners, just progress and the saved file path.
 
+Automating with an agent? Start with the [agent guide](docs/AGENT_GUIDE.md) for JSON output, run inspection and audio verification.
+
 **Only download content you own or are authorized or legally permitted to download.** Respect copyright, website terms, and access restrictions. veo does not bypass DRM, private-content access controls, or paywalls.
 
 ## Install and run
@@ -42,7 +44,9 @@ If something does not work, run `veo doctor` first: it inspects the whole local 
 
 Run `veo` without arguments in an interactive terminal for a guided download: choose a
 profile, enter a link, select video or audio, choose available resolution and output
-directory, and start. Playlist mode also lists entries for selection. The wizard enables
+directory, and start. The wizard checks the link and asks about playlist mode only when
+it finds a collection; configured playlist and entry selection values are preselected.
+Playlist mode also lists entries for selection. The wizard enables
 resume and offers skipping previously downloaded files. With redirected input, use the
 regular command arguments; veo never starts a prompt in a script.
 
@@ -121,6 +125,7 @@ Playlist downloads use two concurrent entries by default; use `--playlist-concur
   line. A final summary counts saved, skipped and failed videos. Successful files are opened
   with `--open` even if another URL or playlist entry fails.
 - Failed or cancelled jobs print a ready-to-use `veo --retry-failed "<job.json>"` command.
+- Use `veo retry --last` to retry the newest failed or unfinished job without copying its path. Active runs are ignored; use `veo runs` to inspect them.
   Jobs are stored under the per-user veo cache's `jobs` directory. Retries retain resolved
   output directories and settings, even from a different working directory, and explicit
   flags can override them. Completed playlist jobs retry only failed indices; interrupted
@@ -135,6 +140,7 @@ veo --batch-file links.txt --profile archive
 veo "https://example.com/playlist" --playlist-items 1,3-5 --resume
 veo "https://example.com/playlist" --playlist --skip-existing
 veo --retry-failed "C:\path\to\job.json"
+veo retry --last
 ```
 
 ### Quality
@@ -310,6 +316,21 @@ download fails because a login is required, the error message points at these fl
   Duplicate detection can return `status: "skipped"`; cancellation returns `"cancelled"`.
   Playlist results also include `saved`, `skipped` and `failures` (with original indices).
   A failed or cancelled playlist can still report files saved before the failure.
+- `veo runs [id] --json` reports active run metadata and per-item progress. Finished attempts
+  remain available through `veo history --json`.
+- `veo inspect <file> --json` reports local container and stream metadata. Add
+  `--check-audio` to decode all audio tracks and measure whether any peak exceeds
+  -60 dBFS. A track can exist without a detectable signal. The check reads the full
+  media file and uses only local FFmpeg/FFprobe tools.
+- Download results and history retain a `runId`. `veo inspect run <id> --json` reads
+  a finished run and checks every saved file before probing it. Renamed media is
+  found by file identity, size and a sampled SHA-256 fingerprint within the original output tree;
+  add `--search <directory>` after moving it elsewhere. Ambiguous or missing files
+  are reported without probing another file. Old runs lack this persistent record.
+  Finished run records live in the current device's veo cache. On Windows, macOS,
+  Linux and Termux, `inspect` uses bundled media tools where supported and otherwise
+  uses local `ffmpeg` and `ffprobe` (or `VEO_FFMPEG_PATH`); it does not install them.
+  Copying only the media to another device does not copy its run ID record.
 
 ### Config file
 
@@ -381,8 +402,17 @@ Esc or Ctrl+Q exits, asking before discarding changes. Use arrows, Home/End and 
 to navigate. Invalid configurations cannot be saved. `--no-color` disables syntax colors.
 In terminals supporting SGR mouse reporting, left-click positions the cursor and dragging
 selects text, including across lines. Backspace/Delete removes the selection; typing replaces
-it. The editor disables mouse reporting again when it exits. Keyboard editing remains available
-in terminals without mouse support.
+it. The mouse wheel scrolls without changing the editing position; Ctrl+Up/Down also scrolls.
+Ctrl+C copies selected text to the system clipboard, and Ctrl+V pastes clipboard text at the
+cursor or replaces the selection. Ctrl+Q or Esc exits the editor. The editor disables mouse
+reporting again when it exits. Keyboard editing remains available in terminals without mouse
+support.
+Clipboard access uses the system clipboard on Windows, `pbcopy`/`pbpaste` on macOS, and
+`wl-clipboard` (Wayland), `xclip` or `xsel` (X11) on Linux. Linux requires one of those tools
+and access to a graphical session. The editor reports when no clipboard is available; terminal
+paste shortcuts can still insert text directly when supported by the terminal.
+On Termux, editor clipboard shortcuts use `termux-clipboard-set`/`termux-clipboard-get`
+when the Termux:API app and `termux-api` package are installed.
 
 Use `veo config edit --external` to use `VISUAL`, then `EDITOR`, then Notepad on Windows
 or `vi` elsewhere. `veo config edit --terminal` explicitly selects the built-in editor.
@@ -441,7 +471,12 @@ veo doctor fix        # restore missing or damaged managed tools
 veo doctor --offline  # skip the network checks
 veo stats             # persistent download totals; --json for scripting
 veo history           # the last 5 downloads; --json for scripting
+veo history --failed --limit 20  # recent failed/cancelled attempts
+veo retry --last       # retry the newest failed or unfinished job
 veo runs              # active runs with their id; veo runs <id> for details
+veo runs --json       # machine-readable active run metadata
+veo inspect FILE --check-audio --json  # track metadata and audio signal
+veo inspect run ID --check-audio --json  # finished run and saved media
 veo stop [id]         # stop one run, or every active run
 veo flush             # stop runs, clear temporary downloads and retry jobs
 veo flush --stats     # the same, and reset the statistics
@@ -464,8 +499,8 @@ command on any failure. The registry can be overridden with `VEO_REGISTRY` (or n
 Run `veo flush` to stop active veo runs started with this version, then remove
 temporary local downloads, including the 15-minute retained files and unfinished
 resume data, and cached retry job JSON files. Those jobs can no longer be retried.
-Saved media, output history, config/profiles, the `veo history` list and backend
-binaries are kept.
+Saved media, output history, config/profiles, the `veo history` list, finished-run
+records and backend binaries are kept.
 Cleanup waits for cancellation; if a run cannot stop, it fails without deleting
 download or job files. Locked folders from older or interrupted processes are
 skipped and reported. Only veo's own per-user cache is cleaned. Statistics are
@@ -483,15 +518,19 @@ as JSON. Statistics contain counters and timestamps, not URLs or filenames.
 
 ### `veo history`
 
-Shows the **last 5 download attempts**, newest first, with title, status, media type,
+Shows the **last 5 download attempts** by default, newest first, with title, status, media type,
 date, duration, URL and the saved files. Saved, skipped, failed and cancelled items are
 recorded, including the reason a failure was reported; playlist entries and retried
 attempts count individually. Active downloads appear once they finish. Long file lists
 are summarized in the text view.
 
-`veo history --json` prints `{"count":N,"entries":[…]}` for scripting. Each entry has
+Use `veo history --limit N` to show 1-1000 attempts, or `veo history --failed` to
+show only failed and cancelled attempts; the flags can be combined. Failed attempts
+include their exact retry-job command when one was recorded. New attempts also show
+their persistent run ID for `veo inspect run <id>`. `veo history --json`
+prints `{"count":N,"entries":[…]}` for scripting. Each entry has
 `at`, `url`, `title`, `status`, `media` (`video`/`audio`), `quality`, `format`, the
-complete `files` list, `error` and `elapsedMs`. Titles and paths are stored without
+complete `files` list, `error`, `elapsedMs` and an optional `job` path. Titles and paths are stored without
 terminal control characters.
 
 History is one small JSON file per attempt in the per-user veo cache's `history`
@@ -612,6 +651,7 @@ if you need them on subsequent launches of 1.6.1.
 
 Automatic setup covers Windows x64/ia32/ARM64, macOS x64/ARM64, Linux x64/ARM64,
 and Android through Termux. Windows ARM64 media tools require x64 emulation.
+`--open` uses `termux-open` in Termux; another Android app must be available to view the file.
 Other systems should supply trusted native binaries. Node.js 22+, npm, internet
 access, executable private storage and working OS libraries are prerequisites;
 network blocks or unavailable repositories can still prevent setup. Android's

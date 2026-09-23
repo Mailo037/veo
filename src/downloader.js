@@ -235,6 +235,12 @@ function backendArgs(options, backend) {
   // which never bypasses access controls on its own.
   if (options.cookies) common.push('--cookies', options.cookies);
   if (options.cookiesFromBrowser) common.push('--cookies-from-browser', options.cookiesFromBrowser);
+  if (options.url) {
+    try {
+      const origin = new URL(options.url).origin;
+      common.push('--referer', `${origin}/`);
+    } catch {}
+  }
   return common;
 }
 

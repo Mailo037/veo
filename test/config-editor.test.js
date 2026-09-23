@@ -87,7 +87,7 @@ test('terminal session saves, blocks invalid writes, confirms discard and restor
   let screen = ''; output.on('data', chunk => { screen += chunk; });
   const waitFor = async condition => {
     for (let i = 0; i < 200; i++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
-    throw new Error('Editor did not reach expected state');
+    throw new Error(`Editor did not reach expected state: ${screen.slice(-500).replace(/\x1b\[[\d;?]*[A-Za-z]/g, '')}`);
   };
   const key = (name, text = '', ctrl = false) => input.emit('keypress', text, { name, ctrl });
   try {
@@ -120,5 +120,43 @@ test('terminal session saves, blocks invalid writes, confirms discard and restor
     assert.equal(input.listenerCount('data'), 0);
     assert.ok(screen.includes('\x1b[?1002l\x1b[?1006l'));
     assert.ok(screen.endsWith('\x1b[?1049l'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('wheel scroll keeps cursor in place and Ctrl+C/V exchange the selected text', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'veo-editor-scroll-'));
+  const file = path.join(dir, 'config.json');
+  const input = new PassThrough(), output = new PassThrough();
+  input.isTTY = output.isTTY = true;
+  input.setRawMode = value => { input.isRaw = value; };
+  output.columns = 100; output.rows = 12;
+  let screen = '', copied = '', pasted = false;
+  output.on('data', chunk => { screen += chunk; });
+  const clipboard = { copy: async text => { copied = text; }, paste: async () => { pasted = true; return copied; } };
+  const waitFor = async condition => {
+    for (let i = 0; i < 200; i++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+    throw new Error(`Editor did not reach expected state: ${screen.slice(-500).replace(/\x1b\[[\d;?]*[A-Za-z]/g, '')}`);
+  };
+  try {
+    await writeFile(file, '{\n  "quality": "best"\n' + Array.from({ length: 12 }, (_, i) => `  // line ${i}`).join('\n') + '\n}\n');
+    const session = editConfig(file, { input, output, clipboard });
+    await waitFor(() => screen.includes('Wheel Scroll'));
+    screen = ''; input.write('\x1b[<65;2;3M');
+    assert.match(screen, /line 3/);
+    assert.match(screen, /Ln 1, Col 1/);
+    assert.ok(!screen.includes('\x1b[?25h'), 'cursor is hidden when scrolled offscreen');
+    screen = ''; input.write('\x1b[<64;2;3M');
+    assert.match(screen, /"quality"/);
+    input.write('\x1b[<0;19;3M\x1b[<32;23;3M\x1b[<0;23;3m');
+    input.write('\x03');
+    await waitFor(() => copied === 'best');
+    assert.equal(copied, 'best');
+    screen = ''; input.write('\x16');
+    await waitFor(() => pasted && screen.includes('Config OK'));
+    input.write('\x13');
+    await waitFor(() => screen.includes('Saved'));
+    assert.match(await readFile(file, 'utf8'), /"quality": "best"/);
+    input.write('\x1b'); await session;
+    assert.equal(input.isRaw, false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

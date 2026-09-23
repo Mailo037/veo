@@ -35,19 +35,25 @@ export async function interactiveArgs(config, { signal, input = process.stdin, o
     args.push(url);
     const type = await choose(`Download (video/audio) [${defaults.audio ? 'audio' : 'video'}]: `, ['video', 'audio'], defaults.audio ? 'audio' : 'video');
     args.push(type === 'audio' ? '--audio' : '--no-audio');
-    const collection = await choose('Download a playlist? (y/n) [n]: ', ['y', 'n'], 'n');
-    args.push(collection === 'y' ? '--playlist' : '--no-playlist');
     output.write('Reading available media…\n');
-    const inspectionOptions = { ...defaults, url, playlist: collection === 'y' };
+    // Inspect the collection first so ordinary video links do not need a playlist prompt.
+    const inspectionOptions = { ...defaults, url, playlist: true };
     const metadata = inspect ? await inspect(inspectionOptions) : await fetchMetadata(inspectionOptions, {
       signal, backend: await prepareBackend(inspectionOptions, { signal }), runner: runBackend,
     });
+    const isCollection = metadata._type === 'playlist' || Boolean(metadata.entries);
+    const collection = isCollection
+      ? await choose(`Download the playlist? (y/n) [${defaults.playlist === false ? 'n' : 'y'}]: `,
+        ['y', 'n'], defaults.playlist === false ? 'n' : 'y')
+      : 'n';
+    args.push(collection === 'y' ? '--playlist' : '--no-playlist');
     output.write(`${cleanText(metadata.title || metadata.id || 'Media')}\n`);
     if (collection === 'y' && metadata.entries) {
       for (const { entry, index } of selectedEntries(metadata)) output.write(`${index}. ${cleanText(entry?.title || 'Unavailable entry')}\n`);
       let selection;
       while (true) {
-        selection = (await question('Entries (e.g. 1,3-5; Enter = all): ')).trim();
+        const preferred = defaults.playlistItems || '';
+        selection = (await question(`Entries (e.g. 1,3-5; Enter = ${preferred || 'all'}): `)).trim() || preferred;
         try { if (selection) validateItems(selection); selectedEntries(metadata, selection); break; }
         catch (error) { output.write(`${error.message}\n`); }
       }
@@ -66,7 +72,8 @@ export async function interactiveArgs(config, { signal, input = process.stdin, o
     if (type === 'audio' && ['mp4', 'mkv', 'webm', 'mov'].includes(defaults.format)) args.push('--format', 'mp3');
     const directory = (await question(`Output directory [${defaults.output || process.cwd()}]: `)).trim() || defaults.output || process.cwd();
     args.push('-o', directory, '--resume');
-    const skip = await choose('Skip previously downloaded videos? (y/n) [y]: ', ['y', 'n'], 'y');
+    const skipDefault = defaults.skipExisting === false ? 'n' : 'y';
+    const skip = await choose(`Skip previously downloaded videos? (y/n) [${skipDefault}]: `, ['y', 'n'], skipDefault);
     args.push(skip === 'y' ? '--skip-existing' : '--no-skip-existing');
     output.write(`Ready: ${type}, ${directory}\n`);
     if (await choose('Start download? (y/n) [y]: ', ['y', 'n'], 'y') === 'n') return null;
