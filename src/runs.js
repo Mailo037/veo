@@ -126,7 +126,16 @@ export async function registerRun(cancel, root = cacheBase()) {
     await rm(file, { force: true });
     throw new Error('veo flush is in progress. Try again after cleanup finishes.');
   }
-  const timer = setInterval(() => { exists(request).then(found => { if (found) cancel(); }).catch(() => {}); }, 200);
+  let cancelling = false;
+  const timer = setInterval(() => {
+    if (cancelling) return;
+    exists(request).then(found => {
+      if (found && !cancelling) {
+        cancelling = true;
+        cancel();
+      }
+    }).catch(() => {});
+  }, 200);
   timer.unref();
   return {
     id,
@@ -145,6 +154,7 @@ export async function registerRun(cancel, root = cacheBase()) {
       await writeJson(file, record);
     },
     async unregister() {
+      cancelling = true;
       clearInterval(timer);
       await rm(file, { force: true });
       await rm(request, { force: true });
