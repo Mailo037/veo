@@ -2,6 +2,12 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.8.2
+
+### Changed
+
+- Updated repository, issue tracker, and homepage URLs to `Mailo037/veodl`.
+
 ## 1.8.1
 
 ### Changed
