@@ -14,7 +14,8 @@ For a page with an embedded player that the normal extractor cannot identify,
 run `veo "<page-url>" --list-sources --json` and choose an `index` from the
 returned `sources`. Then use `veo "<page-url>" --source <index> --dry-run --json`
 before the download. Source discovery opens a temporary headless Chromium-based
-browser and observes media requests after Play. It needs Chrome, Edge or Chromium,
+browser, repeatedly checks for Play controls, and observes media requests after
+interaction. It needs Chrome, Edge or Chromium,
 or `VEO_BROWSER_PATH`. A found source is verified by the backend; size may be
 unknown, and DRM-protected media is excluded. Source numbers are tied to the
 page's current discovery run and may change later.

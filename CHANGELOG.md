@@ -2,6 +2,16 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.9.1
+
+### Added
+
+- Added typo and spelling suggestions for misspelled CLI options and subcommands (e.g. `--deepscan` suggests `--deep-scan`, `veo histroy` suggests `veo history`).
+
+### Fixed
+
+- Improved browser-based player source discovery to continuously detect delayed play controls and overlays inside frames.
+
 ## 1.9.0
 
 ### Added

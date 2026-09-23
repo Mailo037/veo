@@ -192,6 +192,26 @@ test('browser capture sees an XHR media URL after pressing Play', { skip: !brows
   } finally { server.close(); }
 });
 
+test('browser capture keeps checking for a delayed play overlay inside a frame', { skip: !browserCandidates().some(existsSync) }, async () => {
+  const server = createServer((request, response) => {
+    if (request.url === '/movie/delayed') {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<iframe src="/player" style="width:600px;height:300px"></iframe>');
+    } else if (request.url === '/player') {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<script>setTimeout(() => { const play = document.createElement("div"); play.className = "play-button"; play.style = "width:80px;height:50px"; play.onclick = () => fetch("/api/source"); document.body.append(play); }, 900)</script>');
+    } else if (request.url === '/api/source') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ stream: `http://127.0.0.1:${server.address().port}/stream/delayed.m3u8` }));
+    } else { response.writeHead(404); response.end(); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const urls = await captureBrowserMedia(`http://127.0.0.1:${server.address().port}/movie/delayed`, { observeMs: 4500 });
+    assert.ok(urls.some(url => url.endsWith('/stream/delayed.m3u8')));
+  } finally { server.close(); }
+});
+
 test('CLI lists and previews a player source discovered through XHR', {
   skip: process.env.VEO_REAL_BROWSER_TEST !== '1' || !browserCandidates().some(existsSync) || !existsSync(backendExe),
 }, async () => {

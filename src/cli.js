@@ -10,6 +10,7 @@ import { maybeUpdateNotice, updateMain, UPDATE_HELP, defaultRegistry, packageVer
 import { applyProfile, configMain, loadConfig } from './config.js';
 import { validateItems, describeEstimate } from './playlist.js';
 import { parseSourceTimeout } from './source-discovery.js';
+import { explainUnknownOption, optionSpellings, suggestOption } from './option-suggestions.js';
 import { retryOptions, runJob, jobFilePath } from './jobs.js';
 import { QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, validateUrl, readableError, cleanText, validateCookieFile, validateBrowserSpec, cookieFileWarning } from './utils.js';
 
@@ -215,15 +216,54 @@ export function cliOptions(config = {}) {
   return options;
 }
 
+const COMMAND_FLAGS = {
+  stats: ['--json'], history: ['--json', '--limit', '--failed'],
+  runs: ['--json'], stop: [], flush: ['--stats'],
+  inspect: ['--json', '--check-audio', '--search'],
+  doctor: ['--offline', '--output', '-o'],
+  update: ['--check'], up: ['--check'], upgrade: ['--check'], check: ['--check'],
+  backend: ['--check', '--keep-files'],
+  alias: ['--json', '--force', '--bin-dir'],
+  uninstall: ['--prefix', '-p', '--yes', '--keep-cache', '--keep-config', '--keep-aliases', '--json', '--bin-dir'],
+  config: ['--profile', '--external', '--terminal'],
+};
+const COMMAND_NAMES = [...Object.keys(COMMAND_FLAGS), 'retry', 'help', 'version'];
+
+function mistypedCommandOption(args) {
+  const command = args[0];
+  if (command && !command.startsWith('-') && !COMMAND_NAMES.includes(command)) {
+    const suggestion = suggestOption(command, COMMAND_NAMES);
+    if (suggestion) return `Unknown command "${command}". Did you mean "${suggestion}"?`;
+  }
+  const options = Object.hasOwn(COMMAND_FLAGS, command)
+    ? [...COMMAND_FLAGS[command], '--help', '-h', '--no-color', '--color', '--profile']
+    : command === 'retry' ? [...optionSpellings(cliOptions()), '--last'] : null;
+  if (!options) return null; // Download flags are checked by parseCli itself.
+  const start = ['config', 'backend', 'alias'].includes(command) && args[1] && !args[1].startsWith('-') ? 2 : 1;
+  for (const arg of args.slice(start)) {
+    if (arg === '--') break;
+    const name = arg.split('=')[0];
+    if (!name.startsWith('-') || options.includes(name)) continue;
+    const suggestion = suggestOption(name, options);
+    if (suggestion) return `Unknown option "${name}". Did you mean "${suggestion}"?`;
+  }
+  return null;
+}
+
 export function parseCli(args, { config = {} } = {}) {
   if (args[0] === 'help') args = ['--help', ...args.slice(1)];
   if (args[0] === 'version') {
     if (args.length !== 1) throw new Error('Usage: veo version');
     return { version: true };
   }
-  const preliminary = parseArgs({ args, allowPositionals: true, strict: true, allowNegative: true, options: cliOptions() });
+  let preliminary;
+  try { preliminary = parseArgs({ args, allowPositionals: true, strict: true, allowNegative: true, options: cliOptions() }); }
+  catch (error) { throw explainUnknownOption(error, cliOptions()); }
   config = applyProfile(config, preliminary.values.profile);
-  const { values, positionals, tokens } = parseArgs({ args, tokens: true, allowNegative: true, allowPositionals: true, strict: true, options: cliOptions(config) });
+  let parsed;
+  try { parsed = parseArgs({ args, tokens: true, allowNegative: true, allowPositionals: true, strict: true, options: cliOptions(config) }); }
+  catch (error) { throw explainUnknownOption(error, cliOptions(config)); }
+  const { values, positionals, tokens } = parsed;
   if (values.help || values.version) return values;
   // A stored default conflicting with a flag typed right now is a user error;
   // a stored default merely ignored by another flag is not.
@@ -309,6 +349,8 @@ export function parseCli(args, { config = {} } = {}) {
 
 export async function main(args = process.argv.slice(2), { config } = {}) {
   if (args[0] === 'help') args = ['--help', ...args.slice(1)];
+  const mistyped = mistypedCommandOption(args);
+  if (mistyped) { process.stderr.write(`veo: ${mistyped}\n`); return 1; }
   let color = !args.includes('--no-color') && !args.includes('--json');
   let display;
   try {

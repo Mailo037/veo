@@ -7,6 +7,42 @@ import { cleanText, validateUrl } from './utils.js';
 
 const MEDIA_URL = /\.(?:m3u8|mpd|mp4|webm|mov)(?:[?#]|$)/i;
 const MEDIA_TYPE = /(?:mpegurl|dash\+xml|video\/(?:mp4|webm|quicktime))/i;
+const PLAY_CONTROL = String.raw`(() => {
+  const visited = new WeakSet();
+  const state = globalThis[Symbol.for('veo.playControls')] ||= { visited, clicks: 0 };
+  const labelMatches = node => {
+    const label = [node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('data-testid'),
+      node.getAttribute('value'), node.textContent].find(value => value && value.trim())?.trim() || '';
+    return /^(?:play|watch|start|replay|abspielen|ansehen|wiedergabe)(?:\s+(?:video|movie|film|now))?$/i.test(label)
+      || /(?:^|[-_\s])(?:big[-_])?play(?:[-_\s]|$)/i.test(node.className?.baseVal || node.className || '');
+  };
+  const documents = [document];
+  for (let index = 0; index < documents.length && index < 16; index++) {
+    for (const frame of documents[index].querySelectorAll('iframe')) {
+      try { if (frame.contentDocument && !documents.includes(frame.contentDocument)) documents.push(frame.contentDocument); } catch {}
+    }
+  }
+  for (const doc of documents) {
+    const controls = doc.querySelectorAll('button,[role="button"],[aria-label],[title],[data-testid],input[type="button"],input[type="image"],[class*="play"],[class*="Play"]');
+    for (const node of controls) {
+      if (state.clicks >= 8) return false;
+      if (state.visited.has(node) || node.disabled || node.getAttribute('aria-disabled') === 'true' || !labelMatches(node)) continue;
+      const style = doc.defaultView.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none' || !node.getClientRects().length) continue;
+      state.visited.add(node);
+      state.clicks++;
+      node.click();
+      return true;
+    }
+    for (const video of doc.querySelectorAll('video')) {
+      if (state.visited.has(video) || !video.paused) continue;
+      state.visited.add(video);
+      video.play().catch(() => {});
+      return true;
+    }
+  }
+  return false;
+})()`;
 
 function abortable(promise, signal) {
   if (!signal) return promise;
@@ -152,6 +188,7 @@ export async function captureBrowserMedia(pageUrl, { signal, browserPaths = brow
     const cdp = createCdp(socket);
     const responses = new Map();
     const bodyReads = [];
+    const sessions = new Set();
     const collect = (value, mime = '') => {
       if (!MEDIA_URL.test(value) && !MEDIA_TYPE.test(mime)) return;
       try { urls.add(validateUrl(value)); } catch {}
@@ -159,9 +196,11 @@ export async function captureBrowserMedia(pageUrl, { signal, browserPaths = brow
     cdp.on(message => {
       if (message.method === 'Target.attachedToTarget') {
         const attached = message.params.sessionId;
+        sessions.add(attached);
         cdp.send('Network.enable', {}, attached).catch(() => {});
         return;
       }
+      if (message.method === 'Target.detachedFromTarget') sessions.delete(message.params.sessionId);
       if (message.method === 'Network.requestWillBeSent') collect(message.params.request?.url);
       if (message.method === 'Network.responseReceived') {
         const response = message.params.response;
@@ -184,17 +223,19 @@ export async function captureBrowserMedia(pageUrl, { signal, browserPaths = brow
     await abortable(cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }), signal);
     const target = await abortable(cdp.send('Target.createTarget', { url: 'about:blank' }), signal);
     const attached = await abortable(cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true }), signal);
+    sessions.add(attached.sessionId);
     await abortable(cdp.send('Network.enable', {}, attached.sessionId), signal);
     await abortable(cdp.send('Page.enable', {}, attached.sessionId), signal);
     await abortable(cdp.send('Page.navigate', { url: pageUrl }, attached.sessionId), signal);
-    await delay(Math.min(observeMs / 2, 4000), undefined, { signal });
-    await abortable(cdp.send('Runtime.evaluate', { expression: `(() => {
-      for (const video of document.querySelectorAll('video')) video.play().catch(() => {});
-      const buttons = [...document.querySelectorAll('button,[role="button"]')];
-      const play = buttons.find(node => /^(play|watch|abspielen|ansehen|start)(?:\\s+(?:video|movie|film))?$/i.test((node.getAttribute('aria-label') || node.textContent || '').trim()));
-      if (play) play.click();
-    })()`, returnByValue: true }, attached.sessionId).catch(() => {}), signal);
-    await delay(Math.max(1000, observeMs / 2), undefined, { signal });
+    const observeUntil = Date.now() + observeMs;
+    while (Date.now() < observeUntil) {
+      signal?.throwIfAborted();
+      await Promise.allSettled([...sessions].map(sessionId => abortable(cdp.send('Runtime.evaluate', {
+        expression: PLAY_CONTROL, returnByValue: true,
+      }, sessionId), signal)));
+      const remaining = observeUntil - Date.now();
+      if (remaining > 0) await delay(Math.min(300, remaining), undefined, { signal });
+    }
     await Promise.race([Promise.allSettled(bodyReads), delay(1000, undefined, { signal }).catch(() => {})]);
     return [...urls];
   } catch (error) {

@@ -308,8 +308,9 @@ download fails because a login is required, the error message points at these fl
 ### Inspection and scripting
 
 - `veo <page-url> --list-sources` opens the page in a temporary headless Chrome,
-  Edge or Chromium profile, presses a clearly labeled Play button when present,
-  and checks media requests loaded by the player. Use `--json` for numbered source
+  Edge or Chromium profile, repeatedly checks for visible Play controls (including
+  controls added later or inside frames), and watches media requests after interaction.
+  Use `--json` for numbered source
   metadata. Each result includes its title, host, HLS/DASH/direct type, known
   resolutions, estimated MiB size and Mbit/s bitrate when the source provides them. Signed media
   URLs are not printed. Set `VEO_BROWSER_PATH` if the browser is not found.
@@ -329,6 +330,8 @@ download fails because a login is required, the error message points at these fl
   Retry jobs retain the page URL and selected number and discover a fresh media
   URL, because player links may expire. Browser discovery uses a temporary
   profile without copying browser cookies, and cannot unlock DRM content.
+  Misspelled flags and commands show a nearby valid spelling, for example
+  `--deepscan` suggests `--deep-scan`.
 - `--list-formats` prints the backend's own format table for one URL and exits.
 - `--dry-run` prints the title, the resolved quality and the destination path that would be
   used — without creating the output directory or downloading anything.
