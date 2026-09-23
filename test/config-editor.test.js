@@ -17,6 +17,8 @@ test('semantic errors locate properties and values without matching comments or 
     ['{"profiles":{"profiles":{"audio":"yes"}}}', '"yes"', /boolean/, 1],
     ['{"profiles":[]}', '[]', /must be an object/, 1],
     ['{"concurrentFragments":17}', '17', /between 1 and 16/, 1],
+    ['{"timeout":"2weeks"}', '"2weeks"', /--timeout expects seconds/, 1],
+    ['{"profiles":{"scan":{"timeout":"4s"}}}', '"4s"', /Profile "scan".*between 5 seconds/, 1],
     ['{"quality":"best","quality":"bad"}', '"bad"', /Invalid quality/, 1],
   ]) {
     const issue = await validateEditorText(text);
@@ -42,6 +44,7 @@ test('completion offers contextual values and spelling corrections without restr
   assert.equal(text.slice(options.start, options.end), '"mp3"');
   assert.equal(editorCompletions('{"Quality":"best"}', 3).choices[0], 'quality');
   assert.equal(editorCompletions('{"output":"folder"}', 13), null);
+  assert.ok(editorCompletions('{"timeout":"2m"}', 13).choices.includes('2m'));
   assert.equal(editorCompletions('{"quality":', 11), null);
 });
 
@@ -94,6 +97,10 @@ test('terminal session saves, blocks invalid writes, confirms discard and restor
     await writeFile(file, '{}\r\n');
     const session = editConfig(file, { input, output });
     await waitFor(() => screen.includes('Ctrl+S'));
+    const firstFrame = screen.slice(screen.lastIndexOf('\x1b[H') + 3).split('\r\n');
+    assert.equal(firstFrame.length, output.rows, 'the editor fills the terminal without empty status rows');
+    assert.match(firstFrame.at(-2), /Ln 1, Col 1/);
+    assert.match(firstFrame.at(-1), /Config OK/);
     key('right'); key(undefined, '"audio":true'); key('s', '', true);
     await waitFor(() => screen.includes('Saved'));
     assert.equal(await readFile(file, 'utf8'), '{"audio":true}\r\n');

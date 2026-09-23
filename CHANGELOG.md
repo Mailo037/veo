@@ -2,6 +2,22 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.9.0
+
+### Added
+
+- **Browser-based player source discovery**: Added `veo <page-url> --list-sources` to launch a temporary headless Chrome, Edge or Chromium session, simulate playback, and extract embedded media streams (HLS, DASH, direct MP4/WebM).
+- Added `--source <n>` to download or preview (`--dry-run`) a specific discovered source.
+- Added `--deep-scan` and `--timeout <duration>` (e.g. `30s`, `2m`) to configure source candidate search depth and deadlines.
+- Added interactive source discovery prompt in terminals when direct URL extraction finds no downloadable video.
+- Added `autoListSources`, `listSources`, `deepScan`, and `timeout` settings to config defaults and profiles.
+- **Config editor improvements**: Enhanced terminal layout with dynamic multi-line detail rows, compact status display, and automatic refresh of the marked template guide for new options.
+
+### Fixed
+
+- Resolved active configuration path properly when running `veo uninstall`.
+- Ensured run cancellation requests are processed once per run to avoid race conditions.
+
 ## 1.8.3
 
 ### Added

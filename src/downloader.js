@@ -162,6 +162,7 @@ function downloadSettings(options) {
   if (options.compatible) settings.compatible = true;
   if (options.filenameTemplate) settings.filenameTemplate = options.filenameTemplate;
   if (options.folderTemplate) settings.folderTemplate = options.folderTemplate;
+  if (options.source) settings.source = options.source;
   return settings;
 }
 
@@ -237,8 +238,8 @@ function backendArgs(options, backend) {
   if (options.cookiesFromBrowser) common.push('--cookies-from-browser', options.cookiesFromBrowser);
   if (options.url) {
     try {
-      const origin = new URL(options.url).origin;
-      common.push('--referer', `${origin}/`);
+      const referer = options.mediaUrl ? options.url : `${new URL(options.url).origin}/`;
+      common.push('--referer', referer);
     } catch {}
   }
   return common;
@@ -286,7 +287,7 @@ export async function fetchMetadata(options, { signal, backend, runner, reporter
   reporter?.status('Reading video…');
   const args = [...common, '--dump-single-json', '--skip-download'];
   if (options.playlist && !options._entryIndex) args.push('--flat-playlist');
-  args.push('--', options.url);
+  args.push('--', options.mediaUrl || options.url);
   let metadata = JSON.parse(await runner(backend.ytDlp, args, { signal }));
   if (options._entryIndex && metadata.entries) metadata = metadata.entries.find(Boolean);
   if (!metadata) throw new Error('The selected playlist entry is unavailable.');
@@ -321,7 +322,7 @@ export async function previewPath(directory, title, extension, { exists = async 
 export async function listFormats(options, { signal, backendResolver = resolveBackend, runner = runBackend, reporter } = {}) {
   const backend = await prepareBackend(options, { signal, backendResolver, reporter });
   reporter?.status('Reading available formats…');
-  return runner(backend.ytDlp, [...backendArgs(options, backend), '-F', '--', options.url], { signal });
+  return runner(backend.ytDlp, [...backendArgs(options, backend), '-F', '--', options.mediaUrl || options.url], { signal });
 }
 
 /**
@@ -484,7 +485,7 @@ export async function download(options, { signal, reporter, backendResolver = re
         await adaptiveRun(async attempt => {
           const candidates = [];
           const attemptOptions = { ...options, resume: options.resume || attempt > 0, concurrentFragments: reducedLimit(options.concurrentFragments ?? 8, adaptiveState) };
-          const args = [...backendArgs(attemptOptions, backend), ...mediaArgs(attemptOptions, quality), '-o', stagingTemplate(staging, false), '--', options.url];
+          const args = [...backendArgs(attemptOptions, backend), ...mediaArgs(attemptOptions, quality), '-o', stagingTemplate(staging, false), '--', options.mediaUrl || options.url];
           // A failed process may have left a final filename: --no-overwrites
           // would otherwise silently accept that unconfirmed file on retry.
           if (unconfirmed || attempt > 0) args.splice(args.indexOf('--'), 0, '--force-overwrites');

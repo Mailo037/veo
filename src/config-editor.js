@@ -91,7 +91,12 @@ export async function editConfig(file, { input = process.stdin, output = process
   const wasRaw = input.isRaw, wasPaused = input.isPaused();
   const render = () => {
     if (closed) return;
-    const width = Math.max(1, (output.columns || 80) - 1), height = Math.max(1, (output.rows || 24) - 6);
+    const width = Math.max(1, (output.columns || 80) - 1);
+    const diagnosis = issue ? `${issue.line ? `Line ${issue.line}, column ${issue.column}: ` : ''}${issue.message}` : '';
+    const detail = safe(completion ? `Options (${completion.index + 1}/${completion.choices.length}): ${JSON.stringify(completion.choices[completion.index])} | Up/Down choose, Enter apply, Esc cancel` :
+      status ? `${status}${diagnosis ? ` | ${diagnosis}` : ''}` : diagnosis || 'Config OK');
+    const detailRows = Math.min(3, Math.max(1, Math.ceil(detail.length / width)));
+    const height = Math.max(1, (output.rows || 24) - 2 - detailRows);
     const lines = buffer.text.split('\n'), { row, col } = buffer.position;
     const gutter = Math.min(width - 1, String(lines.length).length + 2), available = Math.max(1, width - gutter);
     if (followCursor) {
@@ -117,12 +122,11 @@ export async function editConfig(file, { input = process.stdin, output = process
       } else screen.push(index + 1 === issue?.line && color ? `\x1b[41;97m${prefix}${safe(content)}\x1b[0m` : prefix + colorLine(content, color));
       offset += (line || '').length + 1;
     }
-    screen.push(safe(question ? 'Discard unsaved changes? Y = discard, N / Esc = keep editing' : 'Ctrl+S Save | Ctrl+C Copy | Ctrl+V Paste | Esc Exit | F2 Options | Wheel Scroll').slice(0, width));
-    const diagnosis = issue ? `${issue.line ? `Line ${issue.line}, column ${issue.column}: ` : ''}${issue.message}` : '';
-    const detail = safe(completion ? `Options (${completion.index + 1}/${completion.choices.length}): ${JSON.stringify(completion.choices[completion.index])} | Up/Down choose, Enter apply, Esc cancel` :
-      status ? `${status}${diagnosis ? ` | ${diagnosis}` : ''}` : diagnosis || 'Config OK');
-    for (let row = 0; row < 3; row++) screen.push(detail.slice(row * width, (row + 1) * width));
-    screen.push(`Ln ${row + 1}, Col ${col + 1}`.slice(0, width));
+    const position = `Ln ${row + 1}, Col ${col + 1}`;
+    const help = safe(question ? 'Discard unsaved changes? Y = discard, N / Esc = keep editing' : 'Ctrl+S Save | Ctrl+C Copy | Ctrl+V Paste | Esc Exit | F2 Options | Wheel Scroll');
+    const helpWidth = Math.max(0, width - position.length - 1);
+    screen.push((help.slice(0, helpWidth) + ' '.repeat(Math.max(1, width - position.length - Math.min(help.length, helpWidth))) + position).slice(0, width));
+    for (let index = 0; index < detailRows; index++) screen.push(detail.slice(index * width, (index + 1) * width));
     const cursorVisible = row >= top && row < top + height;
     output.write('\x1b[?25l\x1b[H' + screen.map(line => line + '\x1b[K').join('\r\n') +
       (cursorVisible ? `\x1b[${row - top + 2};${gutter + col - left + 1}H\x1b[?25h` : ''));
@@ -259,7 +263,7 @@ export async function editConfig(file, { input = process.stdin, output = process
         if (key.ctrl || key.meta) return;
         followCursor = true;
         const before = buffer.text;
-        if (key.name === 'pageup' || key.name === 'pagedown') buffer.move((key.name === 'pageup' ? -1 : 1) * Math.max(1, (output.rows || 24) - 4));
+        if (key.name === 'pageup' || key.name === 'pagedown') buffer.move((key.name === 'pageup' ? -1 : 1) * viewport.height);
         else if (['left', 'right', 'up', 'down', 'home', 'end', 'backspace', 'delete', 'return', 'tab'].includes(key.name)) buffer.key(key.name);
         else if (text && !/[\x00-\x1f\x7f-\x9f]/.test(text)) buffer.insert(text);
         if (before !== buffer.text) {

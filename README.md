@@ -307,6 +307,28 @@ download fails because a login is required, the error message points at these fl
 
 ### Inspection and scripting
 
+- `veo <page-url> --list-sources` opens the page in a temporary headless Chrome,
+  Edge or Chromium profile, presses a clearly labeled Play button when present,
+  and checks media requests loaded by the player. Use `--json` for numbered source
+  metadata. Each result includes its title, host, HLS/DASH/direct type, known
+  resolutions, estimated MiB size and Mbit/s bitrate when the source provides them. Signed media
+  URLs are not printed. Set `VEO_BROWSER_PATH` if the browser is not found.
+- Add `--deep-scan` to verify every media candidate observed during the source
+  search. The normal search verifies at most 30 candidates. `--timeout 30s`
+  sets a deadline for browser observation and candidate verification; plain
+  numbers mean seconds, and `m` means minutes (5 seconds to 10 minutes).
+  Defaults are 45 seconds, or 2 minutes with `--deep-scan`. If the deadline
+  is reached, verified sources found so far are shown with a timeout notice.
+  A deep scan covers observed requests; it cannot discover sources that the
+  page never loads. The timeout does not stop a subsequent download.
+- `veo <page-url> --source 2 --dry-run --json` previews source 2;
+  `veo <page-url> --source 2 --json` downloads it. For an unsupported single page
+  URL in a terminal, veo asks whether to search for sources. Answer `y` to see
+  the numbered list and choose one; `n` or Enter keeps the original failure.
+  Scripts must pass `--source <n>`; they never receive an interactive prompt.
+  Retry jobs retain the page URL and selected number and discover a fresh media
+  URL, because player links may expire. Browser discovery uses a temporary
+  profile without copying browser cookies, and cannot unlock DRM content.
 - `--list-formats` prints the backend's own format table for one URL and exits.
 - `--dry-run` prints the title, the resolved quality and the destination path that would be
   used — without creating the output directory or downloading anything.
@@ -363,6 +385,15 @@ Supported keys: `output`, `quality`, `format`, `rename`, `audio`, `open`, `resum
 unknown key produces a warning; invalid JSON or a wrong value type is an error, because
 silently ignoring a typo would be worse.
 
+Source discovery defaults are `deepScan` (boolean), `timeout` (string such as
+`"30s"` or `"2m"`), `listSources` (boolean) and `autoListSources` (boolean).
+`listSources: true` makes a single URL list sources and exit; use
+`--no-list-sources` to download for one invocation. `autoListSources: true`
+starts a source search when ordinary extraction finds no downloadable video,
+without the yes/no question. It still requires a source number before a
+download; scripts receive the source list and a nonzero exit. `deepScan` and
+`timeout` apply to either kind of source search.
+
 Additional defaults are `skipExisting` and `playlistItems`. Boolean defaults can be disabled
 with `--no-open`, `--no-audio`, `--no-resume`, `--no-embed-metadata`, etc. `--no-subs` also
 disables stored subtitle languages and subtitle embedding for that invocation.
@@ -389,8 +420,11 @@ preserving existing settings. An empty profile does not change download behavior
 `veo <url> --profile music` merges global defaults, then the selected profile, then explicit
 CLI flags. `veo config profiles` lists profile names; `veo config path` prints the file path.
 `veo config edit` fills new or empty files with a commented template explaining common
-options and example profiles. Existing files receive a commented reference guide once;
-their settings remain intact. In an interactive terminal, it opens the built-in editor
+options and example profiles. When the template changes in a new veo version,
+`veo config edit` refreshes its marked reference guide in existing files. Active settings
+and comments outside the marked guide remain intact; put personal notes below the guide.
+New options are visible without resetting the config.
+In an interactive terminal, it opens the built-in editor
 unless `VISUAL` or `EDITOR` is configured (an executable path, without shell arguments).
 The editor provides syntax colors, line numbers and live validation. Syntax errors mark
 the affected line; unknown properties and invalid values are highlighted directly, with

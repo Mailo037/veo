@@ -43,6 +43,10 @@ export const CONFIG_KEYS = Object.freeze({
   json: 'boolean',
   skipExisting: 'boolean',
   playlistItems: 'string',
+  deepScan: 'boolean',
+  timeout: 'string',
+  listSources: 'boolean',
+  autoListSources: 'boolean',
 });
 
 export function configFile({ env = process.env, platform = process.platform } = {}) {

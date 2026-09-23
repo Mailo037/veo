@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { configFile, loadConfig, prepareConfigEdit, CONFIG_KEYS } from '../src/config.js';
-import { CONFIG_TEMPLATE, PROFILE_OPTIONS_GUIDE, stripConfigComments, withConfigTemplate } from '../src/config-template.js';
+import { CONFIG_TEMPLATE, PROFILE_OPTIONS_GUIDE, SOURCE_OPTIONS_GUIDE, TEMPLATE_MARKER, stripConfigComments, withConfigTemplate } from '../src/config-template.js';
+import { parseCli } from '../src/cli.js';
 
 test('the config location follows each platform convention and VEO_CONFIG', () => {
   assert.equal(configFile({ env: { VEO_CONFIG: './custom.json' } }), path.resolve('./custom.json'));
@@ -69,8 +70,32 @@ test('a malformed or mistyped config file fails loudly', async () => {
 test('every documented key maps to a supported type', () => {
   for (const [key, type] of Object.entries(CONFIG_KEYS)) {
     assert.ok(['string', 'boolean', 'number'].includes(type), key);
+    assert.ok(CONFIG_TEMPLATE.includes(JSON.stringify(key)), `${key} is missing from the editor template`);
   }
   assert.ok(Object.keys(CONFIG_KEYS).length >= 15);
+});
+
+test('source discovery config defaults are validated and explicit CLI flags override them', async () => {
+  const settings = { deepScan: true, timeout: '2m', listSources: true, autoListSources: true };
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-source-config-'));
+  const file = path.join(directory, 'config.json');
+  try {
+    await writeFile(file, JSON.stringify(settings));
+    const { config } = await loadConfig({ file });
+    const url = 'https://example.test/movie/12';
+    const defaults = parseCli([url], { config });
+    assert.equal(defaults.deepScan, true);
+    assert.equal(defaults.timeoutMs, 120000);
+    assert.equal(defaults.listSources, true);
+    assert.equal(defaults.autoListSources, true);
+    const overrides = parseCli([url, '--no-deep-scan', '--timeout', '30s', '--no-list-sources', '--no-auto-list-sources'], { config });
+    assert.equal(overrides.deepScan, false);
+    assert.equal(overrides.timeoutMs, 30000);
+    assert.equal(overrides.listSources, false);
+    assert.equal(overrides.autoListSources, false);
+    assert.equal(parseCli([url, '--source', '1'], { config }).listSources, false);
+    assert.equal(parseCli(['--retry-failed', 'job.json'], { config }).listSources, false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('invalid config reports the file, exact location and actionable syntax reason', async () => {
@@ -106,6 +131,9 @@ test('config edit fills new and empty files and preserves existing settings', as
   try {
     await prepareConfigEdit(file);
     assert.equal(await readFile(file, 'utf8'), CONFIG_TEMPLATE);
+    assert.match(CONFIG_TEMPLATE, /veo: template revision [a-f0-9]{12}/);
+    assert.match(CONFIG_TEMPLATE, /"deepScan": true/);
+    assert.match(CONFIG_TEMPLATE, /"autoListSources": false/);
     assert.equal((await loadConfig({ file })).config.profiles.music.audio, true);
     await writeFile(file, '\uFEFF  \r\n');
     await prepareConfigEdit(file);
@@ -122,14 +150,43 @@ test('config edit fills new and empty files and preserves existing settings', as
     assert.deepEqual(loaded.profiles.default, {});
     await prepareConfigEdit(file);
     assert.equal(await readFile(file, 'utf8'), annotated, 'do not duplicate the guide');
-    const olderTemplate = CONFIG_TEMPLATE.replace(PROFILE_OPTIONS_GUIDE, '');
+    const olderTemplate = CONFIG_TEMPLATE.replace(/^\/\/ veo: template revision .+\n/m, '').replace(PROFILE_OPTIONS_GUIDE, '');
     await writeFile(file, olderTemplate);
     await prepareConfigEdit(file);
     const refreshed = await readFile(file, 'utf8');
-    assert.ok(refreshed.includes(PROFILE_OPTIONS_GUIDE));
+    assert.match(refreshed, /veo: template reference begin [a-f0-9]{12}/);
+    assert.match(refreshed, /veo: profile download options v4/);
     assert.deepEqual(JSON.parse(stripConfigComments(refreshed)), JSON.parse(stripConfigComments(olderTemplate)));
     await prepareConfigEdit(file);
     assert.equal(await readFile(file, 'utf8'), refreshed, 'profile guide is added only once');
+    const oldSourceTemplate = CONFIG_TEMPLATE.replace(/^\/\/ veo: template revision .+\n/m, '').replace(SOURCE_OPTIONS_GUIDE, '');
+    await writeFile(file, oldSourceTemplate);
+    await prepareConfigEdit(file);
+    const upgradedSource = await readFile(file, 'utf8');
+    assert.equal(upgradedSource.split('veo: source discovery options v1').length, 2);
+    assert.deepEqual(JSON.parse(stripConfigComments(upgradedSource)), JSON.parse(stripConfigComments(oldSourceTemplate)));
+    const staleReference = annotated.replace(/(veo: template reference begin) [a-f0-9]{12}/, '$1 oldrevision').replace('// Current veo options:', '// Obsolete reference option.\n// Current veo options:');
+    await writeFile(file, staleReference);
+    await prepareConfigEdit(file);
+    const renewed = await readFile(file, 'utf8');
+    assert.ok(!renewed.includes('Obsolete reference option'));
+    assert.equal(renewed.split('veo: template reference begin').length, 2);
+    assert.equal(renewed.slice(renewed.indexOf('// Your existing settings:')), annotated.slice(annotated.indexOf('// Your existing settings:')));
+    assert.deepEqual(JSON.parse(stripConfigComments(renewed)), JSON.parse(stripConfigComments(annotated)));
+    await prepareConfigEdit(file);
+    assert.equal(await readFile(file, 'utf8'), renewed);
+    const olderReference = `${TEMPLATE_MARKER}\n// Reference: copy any examples you need into your existing configuration below.\n// old generated hint\n// Your existing settings:\n${original}`;
+    await writeFile(file, olderReference);
+    await prepareConfigEdit(file);
+    const migrated = await readFile(file, 'utf8');
+    assert.ok(!migrated.includes('old generated hint'));
+    assert.ok(migrated.includes('// Your existing settings:'));
+    assert.ok(migrated.includes('"open": true // keep my comment'));
+    assert.equal((await loadConfig({ file })).config.open, true);
+    const personalNote = migrated.replace('// Current veo options:', '// A temporary note in the generated guide\n// Current veo options:');
+    await writeFile(file, personalNote);
+    await prepareConfigEdit(file);
+    assert.equal(await readFile(file, 'utf8'), personalNote, 'do not rewrite a current reference');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

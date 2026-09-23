@@ -10,6 +10,22 @@ veo "https://example.com/video" --json --output ./downloads
 veo inspect "./downloads/video.mp4" --check-audio --json
 ```
 
+For a page with an embedded player that the normal extractor cannot identify,
+run `veo "<page-url>" --list-sources --json` and choose an `index` from the
+returned `sources`. Then use `veo "<page-url>" --source <index> --dry-run --json`
+before the download. Source discovery opens a temporary headless Chromium-based
+browser and observes media requests after Play. It needs Chrome, Edge or Chromium,
+or `VEO_BROWSER_PATH`. A found source is verified by the backend; size may be
+unknown, and DRM-protected media is excluded. Source numbers are tied to the
+page's current discovery run and may change later.
+
+Use `--deep-scan --timeout 2m` with `--list-sources` to check every observed
+media candidate up to a two-minute source-search deadline. The JSON result
+contains `timedOut: true` if the scan stopped at the deadline; any returned
+sources were verified before it stopped. A timed-out listing exits nonzero,
+even if it contains partial results. The timeout applies to discovery,
+not to a later download.
+
 Set `VEO_NO_UPDATE_CHECK=1` when a background update notice would distract a script. Use an explicit output directory to avoid depending on the agent's current working directory. `--dry-run` plans the download without saving media. It can still inspect the source and prepare backend tools on first use.
 
 ## Output and failures

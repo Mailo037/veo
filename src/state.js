@@ -22,6 +22,6 @@ export async function writeJson(file, value) {
 
 // Do not persist browser sessions or cookie paths in retry jobs.
 export function publicOptions(options) {
-  const { cookies, cookiesFromBrowser, profile, urls, url, retryFailed, batchFile, ...safe } = options;
+  const { cookies, cookiesFromBrowser, profile, urls, url, retryFailed, batchFile, mediaUrl, ...safe } = options;
   return { ...safe, output: path.resolve(options.output) };
 }

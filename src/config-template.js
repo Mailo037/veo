@@ -1,6 +1,16 @@
+import { createHash } from 'node:crypto';
 import { translateLegacyConfigComments } from './legacy-config-comments.js';
 
 export const TEMPLATE_MARKER = '// veo: commented configuration template';
+
+export const SOURCE_OPTIONS_GUIDE = String.raw`// veo: source discovery options v1
+// Copy these settings into the global object or a named profile if desired.
+// "deepScan": true,          // Verify every observed media candidate instead of the first 30
+// "timeout": "2m",          // Discovery deadline: 5s to 10m; plain numbers mean seconds
+// "listSources": false,     // true = list sources and exit for single-URL calls
+// "autoListSources": false, // true = search after extraction fails, without a yes/no prompt
+// Command-line flags override these values, including --no-deep-scan and --no-list-sources.
+`;
 
 const PROFILE_OPTIONS_MARKER = '// veo: profile download options v4';
 export const PROFILE_OPTIONS_GUIDE = String.raw`${PROFILE_OPTIONS_MARKER}
@@ -12,6 +22,10 @@ export const PROFILE_OPTIONS_GUIDE = String.raw`${PROFILE_OPTIONS_MARKER}
 // "concurrentDownloads": 2,    // Parallel URLs/batch items: 1-4; default 2
 // "adaptiveConcurrency": true, // Reduce parallelism and retry transient errors
 // "concurrentFragments": 8,    // DASH/HLS fragments: 1-16; default 8
+// "deepScan": true,           // Check every observed source candidate
+// "timeout": "2m",           // Source-search deadline, 5s to 10m
+// "listSources": false,      // List sources and exit for one URL
+// "autoListSources": true,   // Search after extraction fails, without asking
 // "playlist": true,            // Enable only for playlist downloads
 // "playlistConcurrency": 2,    // Simultaneous entries: 1-4; default 2
 // "checkSpace": true,          // Estimate free cache/output space first
@@ -43,7 +57,7 @@ export const PROFILE_OPTIONS_GUIDE = String.raw`${PROFILE_OPTIONS_MARKER}
 // Missing values use Unknown channel/year, No playlist, unknown ID, index 001.
 `;
 
-export const CONFIG_TEMPLATE = String.raw`${TEMPLATE_MARKER}
+const TEMPLATE_SOURCE = String.raw`${TEMPLATE_MARKER}
 // Save and close the editor. Settings apply the next time you run veo.
 // Comments using // or /* ... */ are supported. Command-line options take priority.
 // To enable an option, remove its leading // and adjust the value.
@@ -57,16 +71,26 @@ export const CONFIG_TEMPLATE = String.raw`${TEMPLATE_MARKER}
 
   // Maximum video resolution: best, 2160p, 1440p, 1080p, 720p, ...
   // "quality": "1080p",
+  // "closestQuality": false, // Allow the nearest available resolution
   // Video format: mp4, mkv, webm, mov. Lossless remux; codecs must fit the container.
   // "format": "mp4",
   // "recode": false,           // Explicit video conversion; may lose quality
   // "playlistConcurrency": 2, // Concurrent playlist entries: 1 to 4
+  // "playlistItems": "1-5",  // Download only these playlist entries
+  // "section": "*10:00-12:00", // Download only a time range
   // "open": false,              // Open the completed file automatically
   // "resume": true,             // Resume interrupted downloads
   // "skipExisting": true,       // Skip previously saved downloads
   // "concurrentFragments": 8,   // Concurrent fragments: 1 to 16; default 8
+  // "cookies": "D:/cookies.txt", // Netscape-format cookies file
+  // "cookiesFromBrowser": "firefox", // Use your browser's cookies
+  // "sponsorblockRemove": "sponsor", // Remove matching SponsorBlock segments
+  // "json": false,            // Print machine-readable output for downloads
+
+${SOURCE_OPTIONS_GUIDE}
 
   // Subtitles and additional information:
+  // "subs": true,              // Download subtitles; defaults to English
   // "subLangs": "de,en",        // Enable subtitles for these languages
   // "embedSubs": true,          // Embed subtitles in the video
   // "embedMetadata": true,      // Embed the title, date and other metadata
@@ -102,6 +126,19 @@ ${PROFILE_OPTIONS_GUIDE}
 }
 `;
 
+// The revision follows the template content, so future examples refresh without
+// maintaining a separate version number.
+const TEMPLATE_REVISION = createHash('sha256').update(TEMPLATE_SOURCE).digest('hex').slice(0, 12);
+const REVISION_LINE = `// veo: template revision ${TEMPLATE_REVISION}`;
+const REFERENCE_BEGIN = '// veo: template reference begin';
+const REFERENCE_END = '// veo: template reference end';
+export const CONFIG_TEMPLATE = TEMPLATE_SOURCE.replace(TEMPLATE_MARKER, `${TEMPLATE_MARKER}\n${REVISION_LINE}`);
+
+function currentReference() {
+  const examples = CONFIG_TEMPLATE.split('\n').slice(2).map(line => `// ${line}`).join('\n');
+  return `${REFERENCE_BEGIN} ${TEMPLATE_REVISION}\n// This generated reference is refreshed when the template changes. Keep personal notes below it.\n// Current veo options: copy the settings you need below.\n${examples}\n${REFERENCE_END}`;
+}
+
 // Remove comments only outside JSON strings. Whitespace replacement preserves
 // token boundaries, so malformed input cannot become valid by joining tokens.
 export function stripConfigComments(text) {
@@ -135,13 +172,29 @@ export function withConfigTemplate(text) {
   text = translateLegacyConfigComments(text);
   text = addDefaultProfile(text);
   if (!text.replace(/^\uFEFF/, '').trim()) return CONFIG_TEMPLATE;
-  if (text.replace(/^\uFEFF/, '').startsWith(TEMPLATE_MARKER)) {
-    // Upgrade the commented reference in older configs without changing settings.
-    if (!text.includes(PROFILE_OPTIONS_MARKER)) return text.replace(TEMPLATE_MARKER, `${TEMPLATE_MARKER}\n${PROFILE_OPTIONS_GUIDE}`);
-    return text;
+  text = text.replace(/^\uFEFF/, '');
+  const reference = currentReference();
+  const begin = text.indexOf(REFERENCE_BEGIN);
+  const end = begin < 0 ? -1 : text.indexOf(REFERENCE_END, begin);
+  if (begin >= 0 && end < 0) return text; // Never replace an incomplete user-edited block.
+  if (begin >= 0 && end >= 0) {
+    if (text.slice(begin, end).startsWith(`${REFERENCE_BEGIN} ${TEMPLATE_REVISION}\n`)) return text;
+    const endOfLine = text.indexOf('\n', end);
+    const after = endOfLine < 0 ? text.length : endOfLine;
+    return text.slice(0, begin) + reference + text.slice(after);
   }
-  // Keep existing settings and formatting byte-for-byte after a commented guide.
-  return `${TEMPLATE_MARKER}\n// Reference: copy any examples you need into your existing configuration below.\n${CONFIG_TEMPLATE.split('\n').slice(1).map(line => `// ${line}`).join('\n')}\n// Your existing settings:\n${text.replace(/^\uFEFF/, '')}`;
+  if (text.startsWith(TEMPLATE_MARKER) && text.slice(0, 200).includes(REVISION_LINE)) return text;
+  if (text.startsWith(TEMPLATE_MARKER)) {
+    // Replace the older generated reference prefix, if present. Everything
+    // below the user's settings marker stays exactly as it was.
+    const settingsMarker = '// Your existing settings:';
+    const settingsAt = text.indexOf(settingsMarker);
+    if (text.includes('// Reference: copy any examples') && settingsAt >= 0) {
+      return `${TEMPLATE_MARKER}\n${reference}\n${text.slice(settingsAt)}`;
+    }
+    return text.replace(TEMPLATE_MARKER, `${TEMPLATE_MARKER}\n${reference}`);
+  }
+  return `${TEMPLATE_MARKER}\n${reference}\n// Your existing settings:\n${text}`;
 }
 
 function addDefaultProfile(text) {

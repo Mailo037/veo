@@ -5,7 +5,7 @@ import { applyProfile } from './config.js';
 import { fetchMetadata, prepareBackend, runBackend } from './downloader.js';
 import { describeEstimate, selectedEntries, sizeEstimate, validateItems } from './playlist.js';
 
-export async function interactiveArgs(config, { signal, input = process.stdin, output = process.stderr, ask, inspect } = {}) {
+export async function interactiveArgs(config, { signal, input = process.stdin, output = process.stderr, ask, inspect, discover } = {}) {
   const terminalOutput = output;
   output = outputStream(output);
   const rl = ask ? null : createInterface({ input, output: terminalOutput });
@@ -33,14 +33,47 @@ export async function interactiveArgs(config, { signal, input = process.stdin, o
     }
     const url = validateUrl((await question('Video or playlist URL: ')).trim());
     args.push(url);
+    if (defaults.listSources) {
+      output.write('Listing page sources…\n');
+      args.push('--list-sources');
+      return args;
+    }
     const type = await choose(`Download (video/audio) [${defaults.audio ? 'audio' : 'video'}]: `, ['video', 'audio'], defaults.audio ? 'audio' : 'video');
     args.push(type === 'audio' ? '--audio' : '--no-audio');
     output.write('Reading available media…\n');
     // Inspect the collection first so ordinary video links do not need a playlist prompt.
     const inspectionOptions = { ...defaults, url, playlist: true };
-    const metadata = inspect ? await inspect(inspectionOptions) : await fetchMetadata(inspectionOptions, {
-      signal, backend: await prepareBackend(inspectionOptions, { signal }), runner: runBackend,
-    });
+    const backend = inspect ? null : await prepareBackend(inspectionOptions, { signal });
+    let metadata;
+    try {
+      metadata = inspect ? await inspect(inspectionOptions) : await fetchMetadata(inspectionOptions, { signal, backend, runner: runBackend });
+      if (Array.isArray(metadata.formats) && !metadata.formats.length && !metadata.entries?.length && !metadata.url) {
+        throw new Error('No downloadable video formats found.');
+      }
+    } catch (originalError) {
+      const { discoverSources, formatSource, parseSourceTimeout, shouldOfferSourceDiscovery } = await import('./source-discovery.js');
+      if (!shouldOfferSourceDiscovery(originalError)) throw originalError;
+      if (!defaults.autoListSources) {
+        const answer = (await question('No downloadable video found. Search this page for other sources? (y/N): ')).trim().toLowerCase();
+        if (!['y', 'yes'].includes(answer)) throw originalError;
+      }
+      const inspectSource = (mediaUrl, _page, { signal: scanSignal = signal } = {}) => inspect
+        ? inspect({ ...inspectionOptions, playlist: false, mediaUrl }, scanSignal)
+        : fetchMetadata({ ...inspectionOptions, playlist: false, mediaUrl }, { signal: scanSignal, backend, runner: runBackend });
+      const sources = await (discover || discoverSources)(url, { signal, inspect: inspectSource,
+        deepScan: defaults.deepScan, timeoutMs: defaults.timeout ? parseSourceTimeout(defaults.timeout) : undefined }).catch(() => []);
+      if (!sources.length) throw originalError;
+      for (const source of sources) output.write(`${formatSource(source)}\n`);
+      let selection;
+      while (!selection) {
+        const answer = (await question('Source number: ')).trim();
+        const index = Number(answer);
+        if (/^[1-9]\d*$/.test(answer) && sources[index - 1]) selection = sources[index - 1];
+        else output.write(`Choose a number from 1 to ${sources.length}.\n`);
+      }
+      args.push('--source', String(selection.index));
+      metadata = await inspectSource(selection.url);
+    }
     const isCollection = metadata._type === 'playlist' || Boolean(metadata.entries);
     const collection = isCollection
       ? await choose(`Download the playlist? (y/n) [${defaults.playlist === false ? 'n' : 'y'}]: `,

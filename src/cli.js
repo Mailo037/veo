@@ -3,11 +3,13 @@ import { validateTemplate } from './naming.js';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline/promises';
 import { createReporter } from './progress.js';
 import { openFile } from './open-file.js';
 import { maybeUpdateNotice, updateMain, UPDATE_HELP, defaultRegistry, packageVersion } from './updater.js';
 import { applyProfile, configMain, loadConfig } from './config.js';
 import { validateItems, describeEstimate } from './playlist.js';
+import { parseSourceTimeout } from './source-discovery.js';
 import { retryOptions, runJob, jobFilePath } from './jobs.js';
 import { QUALITIES, VIDEO_FORMATS, AUDIO_FORMATS, validateUrl, readableError, cleanText, validateCookieFile, validateBrowserSpec, cookieFileWarning } from './utils.js';
 
@@ -54,6 +56,11 @@ Options:
                            Read cookies from an installed browser
   --resume                 Keep partial data and continue an interrupted download
   --list-formats           Show the available formats and exit
+  --list-sources           Find video sources loaded by a web page and exit
+  --auto-list-sources      Search automatically after no downloadable video is found
+  --source <n>             Select source number from that page (also for scripts)
+  --deep-scan              Check every media candidate found during source search
+  --timeout <duration>     Source search deadline, e.g. 30, 30s or 2m (5s-10m)
   --dry-run                Show what would be downloaded and exit
   --json                   Print one JSON object per URL instead of prose
   --profile <name>         Apply a named config profile
@@ -120,6 +127,8 @@ const STRING_OPTIONS = {
   'batch-file': {},
   'retry-failed': {},
   'playlist-items': {},
+  source: {},
+  timeout: {},
 };
 
 const BOOLEAN_OPTIONS = {
@@ -139,6 +148,9 @@ const BOOLEAN_OPTIONS = {
   'embed-thumbnail': {},
   'closest-quality': {},
   'list-formats': {},
+  'list-sources': {},
+  'auto-list-sources': {},
+  'deep-scan': {},
   'dry-run': {},
   json: {},
   help: { short: 'h' },
@@ -181,6 +193,11 @@ export function optionDefaults(config = {}) {
     json: config.json ?? false,
     'skip-existing': config.skipExisting ?? false,
     'playlist-items': config.playlistItems,
+    source: config.source,
+    timeout: config.timeout,
+    'deep-scan': config.deepScan ?? false,
+    'list-sources': config.listSources ?? false,
+    'auto-list-sources': config.autoListSources ?? false,
   };
 }
 
@@ -235,6 +252,19 @@ export function parseCli(args, { config = {} } = {}) {
   if (values['closest-quality'] && values.quality === 'best' && typed.closest) throw new Error('--closest-quality requires a numeric --quality such as 1080p.');
   if (values['list-formats'] && (values.audio || values.format)) throw new Error('--list-formats cannot be combined with --audio or --format.');
   if (values['list-formats'] && positionals.length > 1) throw new Error('--list-formats accepts exactly one URL.');
+  if (values.source && (!/^[1-9]\d*$/.test(values.source) || !Number.isSafeInteger(Number(values.source)))) throw new Error('--source requires a positive source number.');
+  if (values.source && values['list-sources'] && !tokens.some(token => token.name === 'list-sources')) values['list-sources'] = false;
+  if (values['list-sources'] && !tokens.some(token => token.name === 'list-sources')
+    && (positionals.length !== 1 || values['batch-file'] || values['retry-failed'])) values['list-sources'] = false;
+  if (values['list-sources'] && (positionals.length !== 1 || values['batch-file'] || values['retry-failed'])) throw new Error('--list-sources accepts exactly one URL.');
+  if (values.source && (positionals.length > 1 || values['batch-file'])) throw new Error('--source accepts exactly one URL.');
+  if (values.source && values['list-sources']) throw new Error('--source and --list-sources are separate actions.');
+  if (values.timeout) parseSourceTimeout(values.timeout);
+  if ((values.source || values['list-sources']) && !tokens.some(token => ['playlist', 'playlist-items'].includes(token.name))) {
+    values.playlist = false;
+    values['playlist-items'] = undefined;
+  }
+  if ((values.source || values['list-sources']) && values.playlist) throw new Error('--source and --list-sources cannot be combined with --playlist.');
   if (values['concurrent-fragments'] !== undefined) {
     const fragments = Number(values['concurrent-fragments']);
     if (!Number.isInteger(fragments) || fragments < 1 || fragments > 16) throw new Error('--concurrent-fragments must be a whole number between 1 and 16.');
@@ -261,6 +291,7 @@ export function parseCli(args, { config = {} } = {}) {
   if (options.section) options.section = options.section.trim();
   if (options.sponsorblockRemove) options.sponsorblockRemove = options.sponsorblockRemove.trim();
   if (options.concurrentFragments !== undefined) options.concurrentFragments = Number(options.concurrentFragments);
+  if (options.timeout) options.timeoutMs = parseSourceTimeout(options.timeout);
   options.playlistConcurrency = concurrency;
   options.concurrentDownloads = Number(values['concurrent-downloads']);
   if (!Number.isInteger(options.concurrentDownloads) || options.concurrentDownloads < 1 || options.concurrentDownloads > 4) throw new Error('--concurrent-downloads must be a whole number between 1 and 4.');
@@ -447,13 +478,43 @@ async function runMain(args, { config }) {
     }
     // The job file is created before the first download, so another terminal can
     // follow this run's per-item progress with `veo runs <id>`.
-    const jobFile = options.listFormats || options.dryRun ? null : jobFilePath();
+    const jobFile = options.listFormats || options.listSources || options.dryRun ? null : jobFilePath();
     await run?.describe({ urls: options.urls, output: options.output ? path.resolve(options.output) : null,
       audio: options.audio, quality: options.quality, format: options.format, playlist: options.playlist, job: jobFile });
     reporter.configure?.({ color: options.color && !options.json });
     reporter.start(options.rename);
     const cookieWarning = cookieFileWarning(options.cookies);
     if (cookieWarning) stderr.write(`veo: ${cookieWarning}\n`);
+
+    // For a single page, fall back to media requests observed while its player loads.
+    // Explicit --source always rediscovers: signed media URLs can expire between runs.
+    if (!retryItems && options.urls.length === 1 && (!options.playlist || options.listSources)) {
+      const discovery = await resolvePageSource(options, { signal: controller.signal, stderr });
+      if (options.listSources) {
+        if (options.json) stdout.write(`${JSON.stringify({ url: options.url, status: 'sources', timedOut: Boolean(discovery.sources.timedOut), sources: discovery.sources.map(({ url, pageUrl, ...safe }) => safe) })}\n`);
+        else for (const source of discovery.sources) stdout.write(`${discovery.formatSource(source)}\n`);
+        if (discovery.sources.timedOut) stderr.write(`veo: Source search timed out after ${options.timeout || (options.deepScan ? '120s' : '45s')}; showing verified sources found so far.\n`);
+        if (!discovery.sources.length) stderr.write(discovery.sources.timedOut
+          ? 'veo: No sources were verified before the timeout.\n'
+          : 'veo: No downloadable sources were found on this page.\n');
+        return discovery.sources.length && !discovery.sources.timedOut ? 0 : 1;
+      }
+      if (discovery.needsSelection) {
+        if (options.json) stdout.write(`${JSON.stringify({ url: options.url, status: 'sources', timedOut: Boolean(discovery.sources.timedOut), sources: discovery.sources.map(({ url, pageUrl, ...safe }) => safe) })}\n`);
+        else for (const source of discovery.sources) stdout.write(`${discovery.formatSource(source)}\n`);
+        stderr.write('veo: Select a source with --source <number>.\n');
+        return 1;
+      }
+      if (discovery.mediaUrl) {
+        options.mediaUrl = discovery.mediaUrl;
+        options.source = String(discovery.source);
+      }
+    }
+    if (retryItems) for (const item of retryItems) {
+      if (!item.source) continue;
+      const discovery = await resolvePageSource(item, { signal: controller.signal, stderr });
+      item.mediaUrl = discovery.mediaUrl;
+    }
 
     if (options.listFormats) {
       const { listFormats } = await import('./downloader.js');
@@ -489,4 +550,64 @@ async function runMain(args, { config }) {
     process.removeListener('SIGINT', cancel);
     process.removeListener('SIGTERM', cancel);
   }
+}
+
+async function askSourceQuestion(prompt, signal) {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try { return await rl.question(prompt, { signal }); }
+  finally { rl.close(); }
+}
+
+export async function resolvePageSource(options, { signal, stderr, inspect, discover, ask = askSourceQuestion,
+  backendResolver, interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY && !options.json) }) {
+  const { fetchMetadata, prepareBackend, runBackend } = await import('./downloader.js');
+  const { discoverSources, formatSource, shouldOfferSourceDiscovery } = await import('./source-discovery.js');
+  const backend = inspect ? null : await (backendResolver || prepareBackend)(options, { signal });
+  const inspectMedia = (request, requestSignal = signal) => inspect ? inspect(request, requestSignal) : fetchMetadata(request, { signal: requestSignal, backend, runner: runBackend });
+  let originalError;
+  if (!options.source && !options.listSources) {
+    try {
+      const metadata = await inspectMedia(options);
+      if (!metadata.entries?.length && !metadata.formats?.length && !metadata.url) {
+        throw new Error('No downloadable video formats found.');
+      }
+      return {};
+    }
+    catch (error) { originalError = error; }
+    if (!shouldOfferSourceDiscovery(originalError)) throw originalError;
+    if (!interactive && !options.autoListSources) throw new Error(`${originalError.message} Use --list-sources to search this page, then --source <number> to select one.`);
+    if (interactive && !options.autoListSources) {
+      const answer = (await ask('No downloadable video found. Search this page for other sources? (y/N): ', signal)).trim().toLowerCase();
+      if (!['y', 'yes'].includes(answer)) throw originalError;
+    }
+  }
+  let sources;
+  try {
+    sources = await (discover || discoverSources)(options.url, {
+      signal, deepScan: options.deepScan, timeoutMs: options.timeoutMs,
+      inspect: (url, _page, { signal: scanSignal } = {}) => inspectMedia({ ...options, mediaUrl: url }, scanSignal),
+    });
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') throw error;
+    if (originalError) throw new Error(`${originalError.message} Source discovery also failed: ${error.message}`);
+    throw error;
+  }
+  if (options.listSources) return { sources, formatSource };
+  if (sources.timedOut) stderr.write(`veo: Source search timed out after ${options.timeout || (options.deepScan ? '120s' : '45s')}; showing verified sources found so far.\n`);
+  if (!sources.length) {
+    if (originalError) throw originalError;
+    throw new Error('No downloadable video sources were found on this page.');
+  }
+  let index = Number(options.source);
+  if (!index) {
+    if (!interactive && options.autoListSources) return { sources, formatSource, needsSelection: true };
+    for (const source of sources) stderr.write(`${formatSource(source)}\n`);
+    if (!interactive) throw new Error('Select a source with --source <number>.');
+    const answer = await ask('Source number (Enter to cancel): ', signal);
+    if (!/^[1-9]\d*$/.test(answer.trim())) throw new Error('No source selected.');
+    index = Number(answer.trim());
+  }
+  const selected = sources[index - 1];
+  if (!selected) throw new Error(`Source ${index} does not exist; choose 1-${sources.length}.`);
+  return { mediaUrl: selected.url, source: index };
 }
