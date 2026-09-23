@@ -233,6 +233,7 @@ export async function captureBrowserMedia(pageUrl, { signal, browserPaths = brow
       await Promise.allSettled([...sessions].map(sessionId => abortable(cdp.send('Runtime.evaluate', {
         expression: PLAY_CONTROL, returnByValue: true,
       }, sessionId), signal)));
+      if (!deepScan && urls.size > 0) break;
       const remaining = observeUntil - Date.now();
       if (remaining > 0) await delay(Math.min(300, remaining), undefined, { signal });
     }
@@ -257,6 +258,11 @@ export async function discoverSources(pageUrl, { signal, capture = captureBrowse
   const scanSignal = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
   const sources = [];
   const seen = new Set();
+  const formatReferences = new Map();
+  const mediaKey = value => {
+    try { const address = new URL(value); return `${address.origin}${address.pathname}`; }
+    catch { return null; }
+  };
   try {
     const observeMs = deepScan ? Math.min(30000, Math.floor(timeoutMs * 0.6)) : Math.min(8000, Math.floor(timeoutMs * 0.5));
     let urls;
@@ -275,11 +281,16 @@ export async function discoverSources(pageUrl, { signal, capture = captureBrowse
         if (seen.has(key)) continue;
         seen.add(key);
         sources.push({ ...summarizeSource(metadata, url, sources.length + 1, pageUrl), url });
+        formatReferences.set(url, new Set((metadata.formats || []).map(format => mediaKey(format.url)).filter(Boolean)));
       } catch { /* A request alone is not proof of downloadable media. */ }
     }
     signal?.throwIfAborted();
-    Object.defineProperty(sources, 'timedOut', { value: timeout.signal.aborted });
-    return sources;
+    // A master playlist and its variant streams describe the same video.
+    const distinct = sources.filter(source => !sources.some(other => other !== source
+      && formatReferences.get(other.url)?.has(mediaKey(source.url))));
+    distinct.forEach((source, index) => { source.index = index + 1; });
+    Object.defineProperty(distinct, 'timedOut', { value: timeout.signal.aborted });
+    return distinct;
   } finally {
     clearTimeout(timer);
   }

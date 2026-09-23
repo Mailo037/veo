@@ -2,6 +2,24 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.10.0
+
+### Added
+
+- **Persistent Profile Management**: Added `veo profile [NAME|list|reset]` commands to view the active configuration profile, inspect available profiles, switch defaults, or reset back to default without manual configuration edits.
+- **On-demand Config Guide**: Added `veo config guide` to display full configuration guidance, supported options, and templates in the terminal without opening the interactive editor.
+- **Interactive Config Editor enhancements**:
+  - Full Undo (`Ctrl+Z`) and Redo (`Ctrl+Y`) history support when modifying settings.
+  - Select All (`Ctrl+A`) shortcut to easily highlight and overwrite lines or entire sections.
+  - Interactive F3 guide management prompt (`A` to add/refresh, `R` to strip documentation lines).
+  - Mouse edge drag auto-scrolling when dragging selections past viewport bounds.
+- **Automatic Browser Source Discovery**: Enabled automatic source discovery fallback by default when direct extraction fails, automatically selecting and proceeding if a single verified media stream is found.
+
+### Changed
+
+- Streamlined source discovery observation polling to immediately proceed once candidate streams are detected.
+- Enhanced progress output styling and ANSI handling across terminal status reporting.
+
 ## 1.9.1
 
 ### Added

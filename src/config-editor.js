@@ -5,6 +5,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { parseConfigText } from './config.js';
 import { semanticIssue, editorCompletions } from './config-diagnostics.js';
 import { configClipboard } from './config-clipboard.js';
+import { addConfigGuide, configGuideState, removeConfigGuide } from './config-template.js';
 
 const safe = text => text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 
@@ -72,6 +73,32 @@ export class EditorBuffer {
   }
 }
 
+class EditorHistory {
+  constructor(buffer) { this.buffer = buffer; this.undoStack = []; this.redoStack = []; this.group = null; }
+  snapshot() { return { text: this.buffer.text, cursor: this.buffer.cursor, anchor: this.buffer.anchor }; }
+  breakGroup() { this.group = null; }
+  record(before, kind, groupable = false) {
+    if (before.text === this.buffer.text) return;
+    const now = Date.now();
+    if (!groupable || this.group?.kind !== kind || now - this.group.at > 600) {
+      this.undoStack.push(before);
+      if (this.undoStack.length > 100) this.undoStack.shift();
+    }
+    this.redoStack.length = 0;
+    this.group = groupable ? { kind, at: now } : null;
+  }
+  change(direction) {
+    const from = direction === 'undo' ? this.undoStack : this.redoStack;
+    if (!from.length) return false;
+    const to = direction === 'undo' ? this.redoStack : this.undoStack;
+    to.push(this.snapshot());
+    const state = from.pop();
+    Object.assign(this.buffer, state);
+    this.breakGroup();
+    return true;
+  }
+}
+
 export function colorLine(line, enabled = true) {
   const clean = safe(line);
   if (!enabled) return clean;
@@ -84,9 +111,12 @@ export async function editConfig(file, { input = process.stdin, output = process
   const original = await readFile(file, 'utf8');
   const newline = original.includes('\r\n') ? '\r\n' : '\n';
   const buffer = new EditorBuffer(original.replace(/\r\n/g, '\n'));
+  const history = new EditorHistory(buffer);
   let saved = buffer.text, disk = original, issue = await validateEditorText(buffer.text);
-  let top = 0, left = 0, followCursor = true, question = false, busy = false, closed = false, timer;
-  let status = '', revision = 0;
+  let top = 0, left = 0, followCursor = true, question = false, guidePrompt = false, busy = false, closed = false, timer;
+  const guideState = configGuideState(buffer.text);
+  let status = guideState === 'outdated' ? 'Updated config guide available. Press F3 to choose.' :
+    guideState === 'current' ? 'Generated guide in file. Press F3 to remove it if duplicated.' : '', revision = 0;
   let viewport, dragging = false, completion = null;
   const wasRaw = input.isRaw, wasPaused = input.isPaused();
   const render = () => {
@@ -96,7 +126,11 @@ export async function editConfig(file, { input = process.stdin, output = process
     const detail = safe(completion ? `Options (${completion.index + 1}/${completion.choices.length}): ${JSON.stringify(completion.choices[completion.index])} | Up/Down choose, Enter apply, Esc cancel` :
       status ? `${status}${diagnosis ? ` | ${diagnosis}` : ''}` : diagnosis || 'Config OK');
     const detailRows = Math.min(3, Math.max(1, Math.ceil(detail.length / width)));
-    const height = Math.max(1, (output.rows || 24) - 2 - detailRows);
+    const helpLines = question ? ['Discard unsaved changes? Y = discard, N / Esc = keep editing'] :
+      guidePrompt ? ['Guide: A add/update | R remove | Esc cancel'] :
+        ['F3 Guide | F2 Options | Ctrl+S Save | Ctrl+Z Undo | Ctrl+Y Redo',
+          'Ctrl+A All | Ctrl+C Copy | Ctrl+V Paste | Esc / Ctrl+Q Exit'];
+    const height = Math.max(1, (output.rows || 24) - 1 - helpLines.length - detailRows);
     const lines = buffer.text.split('\n'), { row, col } = buffer.position;
     const gutter = Math.min(width - 1, String(lines.length).length + 2), available = Math.max(1, width - gutter);
     if (followCursor) {
@@ -123,10 +157,18 @@ export async function editConfig(file, { input = process.stdin, output = process
       offset += (line || '').length + 1;
     }
     const position = `Ln ${row + 1}, Col ${col + 1}`;
-    const help = safe(question ? 'Discard unsaved changes? Y = discard, N / Esc = keep editing' : 'Ctrl+S Save | Ctrl+C Copy | Ctrl+V Paste | Esc Exit | F2 Options | Wheel Scroll');
-    const helpWidth = Math.max(0, width - position.length - 1);
-    screen.push((help.slice(0, helpWidth) + ' '.repeat(Math.max(1, width - position.length - Math.min(help.length, helpWidth))) + position).slice(0, width));
-    for (let index = 0; index < detailRows; index++) screen.push(detail.slice(index * width, (index + 1) * width));
+    for (let index = 0; index < helpLines.length; index++) {
+      const last = index === helpLines.length - 1;
+      const helpWidth = Math.max(0, width - (last ? position.length + 1 : 0));
+      const visibleHelp = safe(helpLines[index]).slice(0, helpWidth);
+      const footer = last ? visibleHelp + ' '.repeat(Math.max(1, width - position.length - visibleHelp.length)) + position : visibleHelp;
+      screen.push(color ? footer.replace(/Ctrl\+[A-Z]|F[23]|Esc|\b[A,R]\b/g, match => `\x1b[1;36m${match}\x1b[0m`) : footer);
+    }
+    for (let index = 0; index < detailRows; index++) {
+      const line = detail.slice(index * width, (index + 1) * width);
+      const tone = completion ? 33 : issue ? 31 : status ? 32 : 90;
+      screen.push(color && line ? `\x1b[${tone}m${line}\x1b[0m` : line);
+    }
     const cursorVisible = row >= top && row < top + height;
     output.write('\x1b[?25l\x1b[H' + screen.map(line => line + '\x1b[K').join('\r\n') +
       (cursorVisible ? `\x1b[${row - top + 2};${gutter + col - left + 1}H\x1b[?25h` : ''));
@@ -135,6 +177,30 @@ export async function editConfig(file, { input = process.stdin, output = process
     const keyboard = new PassThrough();
     const decoder = new StringDecoder('utf8');
     let pending = '', mouseTimer;
+    let dragTimer, dragDirection = 0, dragX = 1;
+    const stopDragScroll = () => { clearInterval(dragTimer); dragTimer = undefined; dragDirection = 0; };
+    const stopDrag = () => { dragging = false; stopDragScroll(); };
+    const extendAt = (x, y) => {
+      const screenRow = Math.max(0, Math.min(viewport.height - 1, y - 2));
+      buffer.point(top + screenRow, left + x - viewport.gutter - 1, true);
+    };
+    const scrollDrag = () => {
+      if (!dragging || !dragDirection || closed) return stopDragScroll();
+      const lastTop = top;
+      top = Math.max(0, Math.min(top + dragDirection, Math.max(0, buffer.text.split('\n').length - viewport.height)));
+      if (top === lastTop) return stopDragScroll();
+      followCursor = false;
+      extendAt(dragX, dragDirection < 0 ? 2 : viewport.height + 1);
+      render();
+    };
+    const updateDragScroll = (x, y) => {
+      dragX = x;
+      const direction = y <= 2 ? -1 : y >= viewport.height + 1 ? 1 : 0;
+      if (direction === dragDirection) return;
+      stopDragScroll();
+      dragDirection = direction;
+      if (direction) dragTimer = setInterval(scrollDrag, 90);
+    };
     const mouse = (button, x, y, release) => {
       if (busy || closed || question) return;
       if (button & 64) {
@@ -146,17 +212,22 @@ export async function editConfig(file, { input = process.stdin, output = process
         return;
       }
       completion = null;
+      if (release) {
+        if (dragging) extendAt(x, y);
+        stopDrag(); render(); return;
+      }
       if ((button & 3) !== 0) return;
       const inside = y >= 2 && y <= viewport.height + 1 && x >= 1 && x <= viewport.width;
       if (!inside && !dragging) return;
-      if (!(button & 32) && !release) {
+      if (!(button & 32)) {
+        stopDrag(); history.breakGroup();
         followCursor = true;
         buffer.point(top + y - 2, left + x - viewport.gutter - 1);
         buffer.anchor = buffer.cursor; dragging = true;
       } else if (dragging) {
-        buffer.point(top + Math.max(0, Math.min(viewport.height - 1, y - 2)), left + x - viewport.gutter - 1, true);
+        extendAt(x, y);
+        updateDragScroll(x, y);
       }
-      if (release) dragging = false;
       render();
     };
     // Filter SGR mouse reports before readline so their digits never enter the file.
@@ -179,7 +250,7 @@ export async function editConfig(file, { input = process.stdin, output = process
     };
     const finish = error => {
       if (closed) return;
-      closed = true; clearTimeout(timer); clearTimeout(mouseTimer);
+      closed = true; clearTimeout(timer); clearTimeout(mouseTimer); stopDrag();
       input.off('data', onData); keyboard.off('keypress', onKey); keyboard.destroy();
       input.off('keypress', onKey); input.off('end', onEnd); input.off('error', onError); output.off('resize', render);
       input.setRawMode(Boolean(wasRaw)); if (wasPaused) input.pause();
@@ -190,18 +261,51 @@ export async function editConfig(file, { input = process.stdin, output = process
     const onError = error => finish(error);
     const onKey = async (text, key = {}) => {
       if (busy || closed) return;
+      if (dragging) stopDrag();
       try {
         if (question) {
           if (text?.toLowerCase() === 'y') return finish();
           if (text?.toLowerCase() === 'n' || key.name === 'escape') question = false;
           render(); return;
         }
+        if (guidePrompt) {
+          guidePrompt = false;
+          if (text?.toLowerCase() === 'a' || text?.toLowerCase() === 'r') {
+            const before = history.snapshot();
+            const updated = text.toLowerCase() === 'a' ? addConfigGuide(buffer.text) : removeConfigGuide(buffer.text);
+            if (updated !== buffer.text) {
+              buffer.text = updated; buffer.cursor = 0; buffer.anchor = null; followCursor = true;
+              history.record(before, 'guide');
+              revision++; clearTimeout(timer);
+              busy = true; issue = await validateEditorText(buffer.text); busy = false;
+              status = text.toLowerCase() === 'a' ? 'Guide added/updated. Ctrl+S saves it.' : 'Generated guide removed. Ctrl+S saves it.';
+            } else status = text.toLowerCase() === 'r' ? 'No generated guide to remove.' : 'Guide is already current.';
+          }
+          render(); return;
+        }
+        if (key.ctrl && key.name === 'a') {
+          history.breakGroup();
+          completion = null; buffer.anchor = 0; buffer.cursor = buffer.text.length; followCursor = true;
+          status = 'All text selected.'; render(); return;
+        }
+        if (key.ctrl && ['z', 'y'].includes(key.name)) {
+          completion = null;
+          const direction = key.name === 'z' ? 'undo' : 'redo';
+          if (history.change(direction)) {
+            followCursor = true; revision++; clearTimeout(timer);
+            busy = true; issue = await validateEditorText(buffer.text); busy = false;
+            status = direction === 'undo' ? 'Undone.' : 'Redone.';
+          } else status = direction === 'undo' ? 'Nothing to undo.' : 'Nothing to redo.';
+          render(); return;
+        }
         if (completion) {
           if (key.name === 'escape') completion = null;
           else if (['up', 'down', 'tab'].includes(key.name)) completion.index = (completion.index + (key.name === 'up' ? -1 : 1) + completion.choices.length) % completion.choices.length;
           else if (key.name === 'return') {
+            const before = history.snapshot();
             buffer.anchor = completion.start; buffer.cursor = completion.end;
             buffer.insert(JSON.stringify(completion.choices[completion.index]));
+            history.record(before, 'completion');
             completion = null; status = ''; revision++; clearTimeout(timer);
             busy = true; issue = await validateEditorText(buffer.text); busy = false;
           }
@@ -212,6 +316,9 @@ export async function editConfig(file, { input = process.stdin, output = process
           completion = options ? { ...options, index: 0 } : null;
           status = options ? '' : 'No options here. Place the cursor on a property or value in valid JSON.';
           render(); return;
+        }
+        if (key.name === 'f3') {
+          completion = null; guidePrompt = true; render(); return;
         }
         if (key.ctrl && key.name === 'c') {
           const [start, end] = buffer.selection;
@@ -229,7 +336,9 @@ export async function editConfig(file, { input = process.stdin, output = process
           try {
             const pasted = (await clipboard.paste()).replace(/\r\n?|\n/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
             if (pasted) {
+              const before = history.snapshot();
               buffer.insert(pasted); followCursor = true;
+              history.record(before, 'paste');
               status = ''; issue = await validateEditorText(buffer.text);
               revision++; clearTimeout(timer);
             } else status = 'Clipboard has no text.';
@@ -245,6 +354,7 @@ export async function editConfig(file, { input = process.stdin, output = process
           question = true; render(); return;
         }
         if (key.ctrl && key.name === 's') {
+          history.breakGroup();
           followCursor = true;
           revision++; clearTimeout(timer); buffer.anchor = null;
           busy = true;
@@ -262,17 +372,22 @@ export async function editConfig(file, { input = process.stdin, output = process
         }
         if (key.ctrl || key.meta) return;
         followCursor = true;
-        const before = buffer.text;
+        const before = history.snapshot();
+        const hadSelection = buffer.selection[0] !== buffer.selection[1];
         if (key.name === 'pageup' || key.name === 'pagedown') buffer.move((key.name === 'pageup' ? -1 : 1) * viewport.height);
         else if (['left', 'right', 'up', 'down', 'home', 'end', 'backspace', 'delete', 'return', 'tab'].includes(key.name)) buffer.key(key.name);
         else if (text && !/[\x00-\x1f\x7f-\x9f]/.test(text)) buffer.insert(text);
-        if (before !== buffer.text) {
+        if (before.text !== buffer.text) {
+          const typing = text && text.length === 1 && !/[\x00-\x1f\x7f-\x9f]/.test(text) && !hadSelection &&
+            !['return', 'tab', 'backspace', 'delete'].includes(key.name);
+          const deleting = ['backspace', 'delete'].includes(key.name) && !hadSelection;
+          history.record(before, typing ? 'typing' : deleting ? key.name : key.name || 'edit', typing || deleting);
           status = ''; issue = null; const current = ++revision; clearTimeout(timer);
           timer = setTimeout(async () => {
             const result = await validateEditorText(buffer.text);
             if (!closed && current === revision) { issue = result; render(); }
           }, 150);
-        }
+        } else history.breakGroup();
         render();
       } catch (error) { finish(error); }
     };

@@ -193,9 +193,11 @@ example through `veo config edit`. Enable it with `veo URL --profile kompatibel`
   reserved by concurrent downloads in the same process. Unknown sizes are reported as
   unknown; conversion sizes and other processes' disk usage cannot be predicted exactly.
   Use `--no-check-space` to disable this conservative check.
-- `--timings` shows elapsed time for setup, metadata, download/backend, processing,
-  saving and retry waits. Download/backend includes the backend's own startup and
-  extraction overhead; these are elapsed timings, not a diagnosis of network speed.
+- `--timings` shows phase times at the end of the run. Single downloads show
+  timing without a summary; multiple downloads show timing below the summary.
+  The phases cover setup, metadata, download/backend, processing, saving and retry waits.
+  Download/backend includes the backend's own startup and extraction overhead;
+  these are summed per-download times, not a diagnosis of network speed.
   JSON results include `timings` in milliseconds, or `entryTimings` for playlists.
   Use `--no-timings` to hide/omit them.
 - Terminal details are gray, titles bold, saves green and errors red. The same styling
@@ -230,7 +232,7 @@ veo config show --profile fast
 Config checks validate every effective profile (or the selected one), including unknown
 settings, ranges and conflicting options. Show prints merged built-in, global and profile
 settings as JSON, with credential paths/browser profiles redacted. Neither command contacts
-video sites. All new options are also documented as commented examples in `veo config edit`.
+video sites. All new options are also documented in `veo config guide`.
 
 ### Files, names and resume
 
@@ -322,11 +324,12 @@ download fails because a login is required, the error message points at these fl
   is reached, verified sources found so far are shown with a timeout notice.
   A deep scan covers observed requests; it cannot discover sources that the
   page never loads. The timeout does not stop a subsequent download.
-- `veo <page-url> --source 2 --dry-run --json` previews source 2;
-  `veo <page-url> --source 2 --json` downloads it. For an unsupported single page
-  URL in a terminal, veo asks whether to search for sources. Answer `y` to see
-  the numbered list and choose one; `n` or Enter keeps the original failure.
-  Scripts must pass `--source <n>`; they never receive an interactive prompt.
+- For an unsupported single page URL, veo searches for media automatically and
+  uses the only verified source when there is one. If several sources are found,
+  the terminal asks which one to use; scripts receive a numbered source list and
+  a nonzero exit. `veo <page-url> --source 2 --dry-run --json` previews a chosen
+  source, and `veo <page-url> --source 2 --json` downloads it. Scripts never
+  receive an interactive prompt.
   Retry jobs retain the page URL and selected number and discover a fresh media
   URL, because player links may expire. Browser discovery uses a temporary
   profile without copying browser cookies, and cannot unlock DRM content.
@@ -391,10 +394,11 @@ silently ignoring a typo would be worse.
 Source discovery defaults are `deepScan` (boolean), `timeout` (string such as
 `"30s"` or `"2m"`), `listSources` (boolean) and `autoListSources` (boolean).
 `listSources: true` makes a single URL list sources and exit; use
-`--no-list-sources` to download for one invocation. `autoListSources: true`
-starts a source search when ordinary extraction finds no downloadable video,
-without the yes/no question. It still requires a source number before a
-download; scripts receive the source list and a nonzero exit. `deepScan` and
+`--no-list-sources` to download for one invocation. `autoListSources` defaults
+to `true` and searches when ordinary extraction finds no downloadable video.
+Set it to `false` or pass `--no-auto-list-sources` to disable that fallback.
+A single verified source is selected automatically; multiple sources require
+a choice. `deepScan` and
 `timeout` apply to either kind of source search.
 
 Additional defaults are `skipExisting` and `playlistItems`. Boolean defaults can be disabled
@@ -403,11 +407,16 @@ disables stored subtitle languages and subtitle embedding for that invocation.
 
 ### Named profiles
 
-If no profile is selected, `profiles.default` is applied automatically. You can also select
-it explicitly with `--profile default`. Other named profiles use global defaults rather
-than inheriting `default`. The wizard preselects `default` when it exists.
-`veo config edit` adds an empty `default` profile to existing configurations if missing,
-preserving existing settings. An empty profile does not change download behavior.
+If no profile is selected, `profiles.default` is applied automatically. `veo profile music`
+selects another named profile for future commands and stores it as `activeProfile` in the
+config; `veo profile` shows the current choice, and `veo profile list` marks it in
+the list. `veo profile reset` removes the stored choice and returns to `default`.
+You can also use `veo profile default` to select it explicitly.
+The names `list` and `reset` are reserved for these commands and cannot be used as profile names.
+`--profile NAME` overrides this choice for one command. Named profiles use global defaults
+rather than inheriting `default`. The wizard preselects the active profile.
+New configurations include an empty `default` profile and the example profiles. Existing configurations are
+left unchanged when opened. An empty profile does not change download behavior.
 
 ```json
 {
@@ -422,11 +431,13 @@ preserving existing settings. An empty profile does not change download behavior
 
 `veo <url> --profile music` merges global defaults, then the selected profile, then explicit
 CLI flags. `veo config profiles` lists profile names; `veo config path` prints the file path.
-`veo config edit` fills new or empty files with a commented template explaining common
-options and example profiles. When the template changes in a new veo version,
-`veo config edit` refreshes its marked reference guide in existing files. Active settings
-and comments outside the marked guide remain intact; put personal notes below the guide.
-New options are visible without resetting the config.
+The download status shows `Profile: NAME` (or `global (no profile)` when none is configured).
+`veo config edit` creates a small, valid configuration for new or empty files. Opening an
+existing configuration does not add or update comments. The current option guide is kept in
+the program; `veo config guide` prints it without changing the file. In the built-in editor,
+F3 offers **A** to add or update the guide at the top and **R** to remove a previously
+generated guide. Ctrl+S saves that choice. This can also clean up the long duplicate block
+inserted by older versions. Personal settings and notes below a generated block are preserved.
 In an interactive terminal, it opens the built-in editor
 unless `VISUAL` or `EDITOR` is configured (an executable path, without shell arguments).
 The editor provides syntax colors, line numbers and live validation. Syntax errors mark
@@ -436,10 +447,12 @@ the same rules as the CLI, including profile overrides and audio/video formats.
 Press F2 on a property or value to open suggestions, use Up/Down to choose, Enter to apply
 or Esc to cancel. Suggestions require valid JSON syntax; free-text values and custom numeric
 resolutions such as `900p` remain supported. Ctrl+S validates and saves;
+Ctrl+Z undoes edits, Ctrl+Y redoes them, and Ctrl+A selects the whole file.
 Esc or Ctrl+Q exits, asking before discarding changes. Use arrows, Home/End and PageUp/PageDown
 to navigate. Invalid configurations cannot be saved. `--no-color` disables syntax colors.
 In terminals supporting SGR mouse reporting, left-click positions the cursor and dragging
-selects text, including across lines. Backspace/Delete removes the selection; typing replaces
+selects text, including across lines. Holding the pointer at the top or bottom while dragging
+scrolls the file and extends the selection. Backspace/Delete removes the selection; typing replaces
 it. The mouse wheel scrolls without changing the editing position; Ctrl+Up/Down also scrolls.
 Ctrl+C copies selected text to the system clipboard, and Ctrl+V pastes clipboard text at the
 cursor or replaces the selection. Ctrl+Q or Esc exits the editor. The editor disables mouse
@@ -464,9 +477,8 @@ $env:VEO_CONFIG_EDITOR = 'external'
 
 Non-interactive sessions use the external editor unless `--terminal` is explicitly selected,
 in which case an interactive-terminal error is reported. The wizard also offers configured profiles.
-Generated templates and app messages are in English. Previously generated German template
-comments are translated the next time you run `veo config edit`; existing profile names,
-paths and custom comments are preserved.
+Generated guides and app messages are in English. Existing comments, profile names and
+settings are preserved when opening the editor.
 
 ### Terminal output
 
@@ -502,9 +514,14 @@ paths and custom comments are preserved.
 ```bash
 veo version           # installed version (also: veo --version or veo -v)
 veo                   # interactive download wizard (terminal only)
-veo config edit       # create/open config, including example profiles
+veo config edit       # create/open config; F3 offers the optional guide
+veo config guide      # print the current option guide
 veo config reset      # confirm with y; back up config and restore the current template
 veo config profiles   # list available profiles
+veo profile            # show the currently selected profile
+veo profile list       # list all profiles and mark the active one
+veo profile music      # use music as the default for future commands
+veo profile reset      # return to default (or global settings if absent)
 veo config path       # show the config file location
 veo doctor            # diagnose the local setup; exit 1 if a check fails
 veo doctor fix        # restore missing or damaged managed tools

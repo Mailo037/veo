@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { configFile, loadConfig, prepareConfigEdit, CONFIG_KEYS } from '../src/config.js';
-import { CONFIG_TEMPLATE, PROFILE_OPTIONS_GUIDE, SOURCE_OPTIONS_GUIDE, TEMPLATE_MARKER, stripConfigComments, withConfigTemplate } from '../src/config-template.js';
+import { configFile, loadConfig, prepareConfigEdit, profileMain, CONFIG_KEYS } from '../src/config.js';
+import { CONFIG_TEMPLATE, CONFIG_GUIDE, addConfigGuide, removeConfigGuide, configGuideState, stripConfigComments } from '../src/config-template.js';
 import { parseCli } from '../src/cli.js';
 
 test('the config location follows each platform convention and VEO_CONFIG', () => {
@@ -70,7 +70,7 @@ test('a malformed or mistyped config file fails loudly', async () => {
 test('every documented key maps to a supported type', () => {
   for (const [key, type] of Object.entries(CONFIG_KEYS)) {
     assert.ok(['string', 'boolean', 'number'].includes(type), key);
-    assert.ok(CONFIG_TEMPLATE.includes(JSON.stringify(key)), `${key} is missing from the editor template`);
+    assert.ok(CONFIG_GUIDE.includes(JSON.stringify(key)), `${key} is missing from the optional guide`);
   }
   assert.ok(Object.keys(CONFIG_KEYS).length >= 15);
 });
@@ -125,15 +125,13 @@ test('invalid config reports the file, exact location and actionable syntax reas
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('config edit fills new and empty files and preserves existing settings', async () => {
+test('config edit leaves existing files untouched and creates a small new config', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-template-'));
   const file = path.join(directory, 'config.json');
   try {
     await prepareConfigEdit(file);
     assert.equal(await readFile(file, 'utf8'), CONFIG_TEMPLATE);
-    assert.match(CONFIG_TEMPLATE, /veo: template revision [a-f0-9]{12}/);
-    assert.match(CONFIG_TEMPLATE, /"deepScan": true/);
-    assert.match(CONFIG_TEMPLATE, /"autoListSources": false/);
+    assert.deepEqual((await loadConfig({ file })).config.profiles.default, {});
     assert.equal((await loadConfig({ file })).config.profiles.music.audio, true);
     await writeFile(file, '\uFEFF  \r\n');
     await prepareConfigEdit(file);
@@ -141,55 +139,94 @@ test('config edit fills new and empty files and preserves existing settings', as
     const original = '{\n  "quality": "480p",\n  "open": true // keep my comment\n}\n';
     await writeFile(file, original);
     await prepareConfigEdit(file);
-    const annotated = await readFile(file, 'utf8');
-    assert.ok(annotated.includes('"open": true // keep my comment'));
-    assert.match(annotated, /commented configuration template/);
-    const loaded = (await loadConfig({ file })).config;
-    assert.equal(loaded.quality, '480p');
-    assert.equal(loaded.open, true);
-    assert.deepEqual(loaded.profiles.default, {});
+    assert.equal(await readFile(file, 'utf8'), original);
+    assert.equal((await loadConfig({ file })).config.quality, '480p');
     await prepareConfigEdit(file);
-    assert.equal(await readFile(file, 'utf8'), annotated, 'do not duplicate the guide');
-    const olderTemplate = CONFIG_TEMPLATE.replace(/^\/\/ veo: template revision .+\n/m, '').replace(PROFILE_OPTIONS_GUIDE, '');
-    await writeFile(file, olderTemplate);
-    await prepareConfigEdit(file);
-    const refreshed = await readFile(file, 'utf8');
-    assert.match(refreshed, /veo: template reference begin [a-f0-9]{12}/);
-    assert.match(refreshed, /veo: profile download options v4/);
-    assert.deepEqual(JSON.parse(stripConfigComments(refreshed)), JSON.parse(stripConfigComments(olderTemplate)));
-    await prepareConfigEdit(file);
-    assert.equal(await readFile(file, 'utf8'), refreshed, 'profile guide is added only once');
-    const oldSourceTemplate = CONFIG_TEMPLATE.replace(/^\/\/ veo: template revision .+\n/m, '').replace(SOURCE_OPTIONS_GUIDE, '');
-    await writeFile(file, oldSourceTemplate);
-    await prepareConfigEdit(file);
-    const upgradedSource = await readFile(file, 'utf8');
-    assert.equal(upgradedSource.split('veo: source discovery options v1').length, 2);
-    assert.deepEqual(JSON.parse(stripConfigComments(upgradedSource)), JSON.parse(stripConfigComments(oldSourceTemplate)));
-    const staleReference = annotated.replace(/(veo: template reference begin) [a-f0-9]{12}/, '$1 oldrevision').replace('// Current veo options:', '// Obsolete reference option.\n// Current veo options:');
-    await writeFile(file, staleReference);
-    await prepareConfigEdit(file);
-    const renewed = await readFile(file, 'utf8');
-    assert.ok(!renewed.includes('Obsolete reference option'));
-    assert.equal(renewed.split('veo: template reference begin').length, 2);
-    assert.equal(renewed.slice(renewed.indexOf('// Your existing settings:')), annotated.slice(annotated.indexOf('// Your existing settings:')));
-    assert.deepEqual(JSON.parse(stripConfigComments(renewed)), JSON.parse(stripConfigComments(annotated)));
-    await prepareConfigEdit(file);
-    assert.equal(await readFile(file, 'utf8'), renewed);
-    const olderReference = `${TEMPLATE_MARKER}\n// Reference: copy any examples you need into your existing configuration below.\n// old generated hint\n// Your existing settings:\n${original}`;
-    await writeFile(file, olderReference);
-    await prepareConfigEdit(file);
-    const migrated = await readFile(file, 'utf8');
-    assert.ok(!migrated.includes('old generated hint'));
-    assert.ok(migrated.includes('// Your existing settings:'));
-    assert.ok(migrated.includes('"open": true // keep my comment'));
-    assert.equal((await loadConfig({ file })).config.open, true);
-    const personalNote = migrated.replace('// Current veo options:', '// A temporary note in the generated guide\n// Current veo options:');
-    await writeFile(file, personalNote);
-    await prepareConfigEdit(file);
-    assert.equal(await readFile(file, 'utf8'), personalNote, 'do not rewrite a current reference');
+    assert.equal(await readFile(file, 'utf8'), original);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('profile command names cannot be used as config profile names', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-reserved-profile-'));
+  const file = path.join(directory, 'config.json');
+  try {
+    for (const name of ['list', 'reset']) {
+      await writeFile(file, JSON.stringify({ profiles: { [name]: { quality: 'best' } } }));
+      await assert.rejects(loadConfig({ file }), new RegExp(`Profile name "${name}" is reserved`));
+    }
+    await writeFile(file, JSON.stringify({ profiles: { default: {}, List: {} } }));
+    assert.deepEqual(Object.keys((await loadConfig({ file })).config.profiles), ['default', 'List']);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('profile command persists the active profile without removing comments or other settings', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-profile-switch-'));
+  const file = path.join(directory, 'config.json');
+  const original = '\uFEFF// personal note\r\n{\r\n  "quality": "720p",\r\n  "profiles": { "default": {}, "music": { "audio": true } }\r\n}\r\n';
+  const output = { text: '', write(value) { this.text += value; } };
+  try {
+    await writeFile(file, original);
+    assert.equal(await profileMain([], { file, output }), 0);
+    assert.match(output.text, /Active profile: default/);
+    await assert.rejects(profileMain(['missing'], { file, output }), /Unknown profile/);
+    assert.equal(await readFile(file, 'utf8'), original);
+    await profileMain(['music'], { file, output });
+    const changed = await readFile(file, 'utf8');
+    assert.ok(changed.startsWith('\uFEFF// personal note\r\n'));
+    assert.match(changed, /"activeProfile": "music"/);
+    assert.match(changed, /"quality": "720p"/);
+    assert.equal(parseCli(['https://example.test/video'], { config: (await loadConfig({ file })).config }).audio, true);
+    assert.equal(parseCli(['https://example.test/video'], { config: (await loadConfig({ file })).config }).profile, 'music');
+    assert.equal(parseCli(['https://example.test/video', '--profile', 'default'], { config: (await loadConfig({ file })).config }).audio, false);
+    output.text = '';
+    await profileMain(['list'], { file, output });
+    assert.match(output.text, /\* music \(active\)/);
+    assert.match(output.text, /  default/);
+    await profileMain(['default'], { file, output });
+    assert.equal((await loadConfig({ file })).config.activeProfile, 'default');
+    assert.equal((await readFile(file, 'utf8')).split('activeProfile').length, 2, 'switch updates one property');
+    await profileMain(['reset'], { file, output });
+    assert.equal((await loadConfig({ file })).config.activeProfile, undefined);
+    assert.equal(parseCli(['https://example.test/video'], { config: (await loadConfig({ file })).config }).profile, 'default');
+    assert.match(await readFile(file, 'utf8'), /personal note/);
+    output.text = '';
+    await profileMain(['list'], { file, output });
+    assert.match(output.text, /\* default \(active\)/);
+    await writeFile(file, '{"profiles":{"music":{"audio":true}},"activeProfile":"music"}');
+    await profileMain(['reset'], { file, output });
+    assert.equal((await loadConfig({ file })).config.activeProfile, undefined);
+    assert.equal(parseCli(['https://example.test/video'], { config: (await loadConfig({ file })).config }).profile, undefined);
+    assert.doesNotMatch(await readFile(file, 'utf8'), /activeProfile/);
+    output.text = '';
+    await profileMain(['list'], { file, output });
+    assert.match(output.text, /\* global \(no profile\)/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('generated config guides are optional, replaceable and removable without changing settings', () => {
+  const original = '// My note\n{"quality":"best","profiles":{"music":{"audio":true}}}\n';
+  const guided = addConfigGuide(original);
+  assert.equal(configGuideState(original), 'absent');
+  assert.equal(configGuideState(guided), 'current');
+  assert.deepEqual(JSON.parse(stripConfigComments(guided)), JSON.parse(stripConfigComments(original)));
+  assert.equal(removeConfigGuide(guided), original);
+  assert.equal(addConfigGuide(guided), guided);
+  const stale = guided.replace(/(veo: template reference begin) [a-f0-9]{12}/, '$1 old');
+  assert.equal(configGuideState(stale), 'outdated');
+  assert.equal(addConfigGuide(stale), guided);
+  const incomplete = guided.replace('// veo: template reference end', '// missing end');
+  assert.equal(configGuideState(incomplete), 'incomplete');
+  assert.equal(addConfigGuide(incomplete), incomplete);
+  assert.equal(removeConfigGuide(incomplete), incomplete);
+  const duplicated = '// veo: commented configuration template\n' + CONFIG_GUIDE +
+    '// Save and close the editor. Settings apply the next time you run veo.\n' + original;
+  assert.equal(removeConfigGuide(duplicated), '// Save and close the editor. Settings apply the next time you run veo.\n' + original);
+  const legacy = '// veo: commented configuration template\n// Reference: copy any examples below.\n// old examples\n// Your existing settings:\n' + original;
+  assert.equal(configGuideState(legacy), 'outdated');
+  assert.equal(removeConfigGuide(legacy), original);
+  const bom = '\uFEFF' + original;
+  assert.equal(removeConfigGuide(addConfigGuide(bom)), bom);
+});
 test('comment parsing preserves URLs, escaped quotes and Windows paths', () => {
   const data = { output: 'C:\\Videos\\', rename: 'https://example.test/a//b/*text*/ "quoted"', quality: '720p' };
   const text = `\uFEFF/* settings */\n${JSON.stringify(data, null, 2)} // end\n`;
@@ -200,16 +237,13 @@ test('comment parsing preserves URLs, escaped quotes and Windows paths', () => {
   assert.throws(() => JSON.parse(stripConfigComments('{"audio": false,}')));
 });
 
-test('legacy generated comments become English without changing user settings or notes', () => {
-  // German literals here are migration inputs, not text emitted by the app.
-  const legacy = '// veo: kommentierte Konfigurationsvorlage\n// Untertitel und Zusatzinformationen:\n//   // Fertige Datei automatisch oeffnen\n//     "musik": {\n{\n  // My custom note\n  "profiles": {"musik": {"audio": true}},\n  "output": "D:/Meine Videos"\n}\n';
-  const translated = withConfigTemplate(legacy);
-  assert.match(translated, /^\/\/ veo: commented configuration template/);
-  assert.match(translated, /Subtitles and additional information/);
-  assert.match(translated, /"music":/);
-  assert.match(translated, /My custom note/);
-  const expected = JSON.parse(stripConfigComments(legacy));
-  expected.profiles.default = {};
-  assert.deepEqual(JSON.parse(stripConfigComments(translated)), expected);
-  assert.equal(withConfigTemplate(translated), translated);
+test('old personal comments and profile names are preserved when opening the editor', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-legacy-'));
+  const file = path.join(directory, 'config.json');
+  const legacy = '// Meine Notiz\n{"profiles":{"musik":{"audio":true}}}\n';
+  try {
+    await writeFile(file, legacy);
+    await prepareConfigEdit(file);
+    assert.equal(await readFile(file, 'utf8'), legacy);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

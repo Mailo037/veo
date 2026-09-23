@@ -35,7 +35,7 @@ test('playlist workers bound concurrency, serialize callbacks and preserve outpu
       const index = Number(args[args.indexOf('--playlist-items') + 1]);
       if (args.includes('--dump-single-json')) return JSON.stringify(index ? entries[index - 1] : { entries });
       peak = Math.max(peak, ++active);
-      await new Promise(resolve => setTimeout(resolve, index === 1 ? 60 : 15));
+      await new Promise(resolve => setTimeout(resolve, index <= concurrency ? 60 : 15));
       const file = path.join(path.dirname(args[args.indexOf('-o') + 1]), 'media.mp4');
       await writeFile(file, `entry ${index}`);
       onLine(`veo-file:${JSON.stringify(file)}`);

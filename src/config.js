@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { configBase } from './paths.js';
 import { configSyntaxError } from './config-errors.js';
-import { CONFIG_TEMPLATE, stripConfigComments, withConfigTemplate } from './config-template.js';
+import { CONFIG_TEMPLATE, CONFIG_GUIDE, stripConfigComments } from './config-template.js';
 
 /**
  * Keys accepted in the config file, with the CLI flag they act as a default for.
@@ -48,6 +48,8 @@ export const CONFIG_KEYS = Object.freeze({
   listSources: 'boolean',
   autoListSources: 'boolean',
 });
+
+export const RESERVED_PROFILE_NAMES = Object.freeze(['list', 'reset']);
 
 export function configFile({ env = process.env, platform = process.platform } = {}) {
   const override = env.VEO_CONFIG;
@@ -96,10 +98,16 @@ export function parseConfigText(text, target = 'config') {
   const config = {};
   for (const [key, value] of Object.entries(data)) {
     if (key === '$schema') continue;
+    if (key === 'activeProfile') {
+      if (typeOf(value) !== 'string' || !value) throw new Error(`Config key "activeProfile" must be a non-empty string (${target}).`);
+      config.activeProfile = value;
+      continue;
+    }
     if (key === 'profiles') {
       if (!value || typeOf(value) !== 'object') throw new Error('Config profiles must be an object.');
       config.profiles = Object.create(null);
       for (const [name, profile] of Object.entries(value)) {
+        if (RESERVED_PROFILE_NAMES.includes(name)) throw new Error(`Profile name "${name}" is reserved for veo profile ${name}. Rename it in ${target}.`);
         if (!profile || typeOf(profile) !== 'object') throw new Error(`Profile "${name}" must be an object.`);
         const checked = {};
         for (const [setting, item] of Object.entries(profile)) {
@@ -121,17 +129,92 @@ export function parseConfigText(text, target = 'config') {
     }
     config[key] = value;
   }
+  if (config.activeProfile && !Object.hasOwn(config.profiles || {}, config.activeProfile)) {
+    throw new Error(`Unknown active profile "${config.activeProfile}" in ${target}. Available: ${Object.keys(config.profiles || {}).join(', ') || 'none'}.`);
+  }
   return { file: target, exists: true, config, warnings };
 }
 
+export function selectedProfileName(config, name) {
+  return name || config.activeProfile || (Object.hasOwn(config.profiles || {}, 'default') ? 'default' : undefined);
+}
+
 export function applyProfile(config, name) {
-  const { profiles, ...defaults } = config;
-  if (!name) {
-    if (!profiles || !Object.hasOwn(profiles, 'default')) return defaults;
-    name = 'default';
-  }
+  const { profiles, activeProfile, ...defaults } = config;
+  name = selectedProfileName(config, name);
+  if (!name) return defaults;
   if (!profiles || !Object.hasOwn(profiles, name)) throw new Error(`Unknown profile "${name}". Available: ${Object.keys(profiles || {}).join(', ') || 'none'}. Use veo config edit.`);
   return { ...defaults, ...profiles[name] };
+}
+
+export async function profileMain(args, { file = configFile(), output = process.stdout } = {}) {
+  if (args.length > 1 || args[0]?.startsWith('-')) throw new Error('Usage: veo profile [list|reset|NAME]');
+  const loaded = await loadConfig({ file });
+  if (!args.length) {
+    output.write(`Active profile: ${selectedProfileName(loaded.config) || 'global (no profile)'}\n`);
+    output.write(`Available: ${Object.keys(loaded.config.profiles || {}).join(', ') || 'none'}\n`);
+    return 0;
+  }
+  if (args[0] === 'list' && args.length === 1) {
+    const names = Object.keys(loaded.config.profiles || {});
+    if (!names.length) output.write('No profiles configured. Use veo config edit.\n');
+    else {
+      const active = selectedProfileName(loaded.config);
+      output.write(`Profiles:\n${active ? '' : '* global (no profile)\n'}${names.map(name => `${name === active ? '* ' : '  '}${name}${name === active ? ' (active)' : ''}`).join('\n')}\n`);
+    }
+    return 0;
+  }
+  const reset = args[0] === 'reset' && args.length === 1;
+  const name = args[0];
+  if (!reset) {
+    applyProfile(loaded.config, name);
+    await effectiveConfig(loaded.config, name);
+  }
+  if (!loaded.exists) {
+    output.write('Active profile: global (no profile)\n');
+    return 0;
+  }
+  const original = await readFile(file, 'utf8');
+  // Token locations come from the comment-aware parser, preserving hand-written notes.
+  const { configSource } = await import('./config-diagnostics.js');
+  const { nodes } = configSource(original);
+  const property = nodes.get(JSON.stringify(['activeProfile']));
+  let updated;
+  if (reset) {
+    if (!property) updated = original;
+    else {
+      const clean = (original.startsWith('\uFEFF') ? ' ' : '') + stripConfigComments(original);
+      let start = property.keyStart, end = property.end;
+      while (/\s/.test(clean[end] || '')) end++;
+      if (clean[end] === ',') end++;
+      else {
+        let before = start - 1;
+        while (before >= 0 && /\s/.test(clean[before])) before--;
+        if (clean[before] === ',') start = before;
+        end = property.end;
+      }
+      updated = original.slice(0, start) + original.slice(end);
+    }
+  } else if (property) updated = original.slice(0, property.start) + JSON.stringify(name) + original.slice(property.end);
+  else {
+    const root = nodes.get('[]');
+    const clean = (original.startsWith('\uFEFF') ? ' ' : '') + stripConfigComments(original);
+    const first = root.start + 1 + clean.slice(root.start + 1, root.end - 1).search(/\S/);
+    const empty = first === root.start;
+    const newline = original.includes('\r\n') ? '\r\n' : '\n';
+    const position = empty ? root.end - 1 : first;
+    const indent = empty ? '  ' : /^[ \t]*$/.test(original.slice(original.lastIndexOf('\n', position - 1) + 1, position))
+      ? original.slice(original.lastIndexOf('\n', position - 1) + 1, position) : '';
+    updated = original.slice(0, position) + (empty ? `${newline}${indent}` : '') +
+      `"activeProfile": ${JSON.stringify(name)}${empty ? `${newline}` : `,${newline}${indent}`}` + original.slice(position);
+  }
+  parseConfigText(updated, file);
+  if (updated !== original) {
+    if (await readFile(file, 'utf8') !== original) throw new Error('Config changed while switching profiles. Try again.');
+    await writeFile(file, updated, 'utf8');
+  }
+  output.write(`Active profile: ${reset ? selectedProfileName(parseConfigText(updated, file).config) || 'global (no profile)' : name}\n`);
+  return 0;
 }
 
 export async function prepareConfigEdit(file) {
@@ -140,8 +223,7 @@ export async function prepareConfigEdit(file) {
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
     const original = await readFile(file, 'utf8');
-    const annotated = withConfigTemplate(original);
-    if (annotated !== original) await writeFile(file, annotated, 'utf8');
+    if (!original.replace(/^\uFEFF/, '').trim()) await writeFile(file, CONFIG_TEMPLATE, 'utf8');
   }
 }
 
@@ -149,7 +231,7 @@ export async function configMain(args) {
   const editorColor = !args.includes('--no-color') && !Object.hasOwn(process.env, 'NO_COLOR');
   let stdout;
   [args, stdout] = commandOutput(args, process.stdout);
-  if (args[0] === 'show') stdout = process.stdout;
+  if (args[0] === 'show' || args[0] === 'guide') stdout = process.stdout;
   const file = configFile();
   if (args[0] === 'reset') {
     if (args.length !== 1) throw new Error('Usage: veo config reset');
@@ -179,8 +261,9 @@ export async function configMain(args) {
     if (args.length > 2 || (args[1] && !['--external', '--terminal'].includes(args[1]))) throw new Error('Usage: veo config edit [--external|--terminal]');
     editorMode = args[1]?.slice(2) || process.env.VEO_CONFIG_EDITOR || 'auto';
     if (!['auto', 'external', 'terminal'].includes(editorMode)) throw new Error('VEO_CONFIG_EDITOR must be auto, external or terminal.');
-  } else if (args.length !== 1 || !['path', 'profiles'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles|check|show|reset');
+  } else if (args.length !== 1 || !['path', 'profiles', 'guide'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles|guide|check|show|reset');
   if (args[0] === 'path') { stdout.write(`${file}\n`); return 0; }
+  if (args[0] === 'guide') { stdout.write(CONFIG_GUIDE); return 0; }
   if (args[0] === 'profiles') {
     const loaded = await loadConfig();
     stdout.write(`${Object.keys(loaded.config.profiles || {}).join('\n') || 'No profiles configured. Use veo config edit.'}\n`);

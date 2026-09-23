@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EditorBuffer, colorLine, editConfig, validateEditorText } from '../src/config-editor.js';
 import { editorCompletions } from '../src/config-diagnostics.js';
+import { CONFIG_GUIDE } from '../src/config-template.js';
 
 test('semantic errors locate properties and values without matching comments or other profiles', async () => {
   for (const [text, span, message, line] of [
@@ -19,6 +20,9 @@ test('semantic errors locate properties and values without matching comments or 
     ['{"concurrentFragments":17}', '17', /between 1 and 16/, 1],
     ['{"timeout":"2weeks"}', '"2weeks"', /--timeout expects seconds/, 1],
     ['{"profiles":{"scan":{"timeout":"4s"}}}', '"4s"', /Profile "scan".*between 5 seconds/, 1],
+    ['{"activeProfile":"missing","profiles":{"default":{}}}', '"missing"', /Unknown active profile/, 1],
+    ['{"profiles":{"list":{}}}', '"list"', /reserved for veo profile list/, 1],
+    ['{"profiles":{"reset":{}}}', '"reset"', /reserved for veo profile reset/, 1],
     ['{"quality":"best","quality":"bad"}', '"bad"', /Invalid quality/, 1],
   ]) {
     const issue = await validateEditorText(text);
@@ -45,6 +49,7 @@ test('completion offers contextual values and spelling corrections without restr
   assert.equal(editorCompletions('{"Quality":"best"}', 3).choices[0], 'quality');
   assert.equal(editorCompletions('{"output":"folder"}', 13), null);
   assert.ok(editorCompletions('{"timeout":"2m"}', 13).choices.includes('2m'));
+  assert.deepEqual(editorCompletions('{"activeProfile":"music","profiles":{"default":{},"music":{}}}', 19).choices, ['default', 'music']);
   assert.equal(editorCompletions('{"quality":', 11), null);
 });
 
@@ -147,7 +152,7 @@ test('wheel scroll keeps cursor in place and Ctrl+C/V exchange the selected text
   try {
     await writeFile(file, '{\n  "quality": "best"\n' + Array.from({ length: 12 }, (_, i) => `  // line ${i}`).join('\n') + '\n}\n');
     const session = editConfig(file, { input, output, clipboard });
-    await waitFor(() => screen.includes('Wheel Scroll'));
+    await waitFor(() => /Ctrl\+A.*All/.test(screen));
     screen = ''; input.write('\x1b[<65;2;3M');
     assert.match(screen, /line 3/);
     assert.match(screen, /Ln 1, Col 1/);
@@ -165,5 +170,136 @@ test('wheel scroll keeps cursor in place and Ctrl+C/V exchange the selected text
     assert.match(await readFile(file, 'utf8'), /"quality": "best"/);
     input.write('\x1b'); await session;
     assert.equal(input.isRaw, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('F3 removes an old duplicate guide, can reinsert it, and Ctrl+A selects the file', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'veo-editor-guide-'));
+  const file = path.join(dir, 'config.json');
+  const settings = '// personal note\n{"quality":"best"}\n';
+  const old = '// veo: commented configuration template\n' +
+    CONFIG_GUIDE.replace(/(veo: template reference begin) [a-f0-9]{12}/, '$1 older') + settings;
+  const input = new PassThrough(), output = new PassThrough();
+  input.isTTY = output.isTTY = true;
+  input.setRawMode = value => { input.isRaw = value; };
+  output.columns = 95; output.rows = 20;
+  let screen = '', copied;
+  output.on('data', chunk => { screen += chunk; });
+  const waitFor = async condition => {
+    for (let i = 0; i < 300; i++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+    throw new Error(`Editor did not reach expected state: ${screen.slice(-400)}`);
+  };
+  const key = (name, text = '', ctrl = false) => input.emit('keypress', text, { name, ctrl });
+  try {
+    await writeFile(file, old);
+    const session = editConfig(file, { input, output, color: true, clipboard: { copy: async text => { copied = text; }, paste: async () => copied } });
+    await waitFor(() => screen.includes('Updated config guide available'));
+    assert.match(screen, /\x1b\[1;36mCtrl\+A\x1b\[0m/);
+    input.write('\x1bOR'); assert.match(screen.replace(/\x1b\[[\d;]*m/g, ''), /Guide: A add\/update/);
+    key('r', 'r'); await waitFor(() => screen.includes('Generated guide removed'));
+    assert.equal(await readFile(file, 'utf8'), old, 'no change before saving');
+    screen = ''; key('s', '', true); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), settings);
+    key('f3'); key('a', 'a'); await waitFor(() => screen.includes('Guide added/updated'));
+    screen = ''; key('s', '', true); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), CONFIG_GUIDE + settings);
+    input.write('\x01');
+    assert.match(screen, /All text selected/);
+    key('c', '', true); await waitFor(() => copied !== undefined);
+    assert.equal(copied, CONFIG_GUIDE + settings);
+    key('escape'); await session;
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Ctrl+Z and Ctrl+Y undo and redo grouped typing, replacement and paste', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'veo-editor-history-'));
+  const file = path.join(dir, 'config.json');
+  const input = new PassThrough(), output = new PassThrough();
+  input.isTTY = output.isTTY = true;
+  input.setRawMode = value => { input.isRaw = value; };
+  output.columns = 95; output.rows = 15;
+  let screen = '';
+  let pasteText = 'true';
+  output.on('data', chunk => { screen += chunk; });
+  const waitFor = async condition => {
+    for (let i = 0; i < 200; i++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+    throw new Error('Editor did not reach expected state');
+  };
+  try {
+    await writeFile(file, '{}\n');
+    const session = editConfig(file, { input, output, clipboard: { copy: async () => {}, paste: async () => pasteText } });
+    await waitFor(() => /Ctrl\+Z.*Undo/.test(screen));
+    input.write('\x1b[C');
+    input.write('"audio":');
+    screen = ''; input.write('\x16'); await waitFor(() => screen.includes('Config OK'));
+    screen = ''; input.write('\x1a'); await waitFor(() => screen.includes('Undone.'));
+    assert.equal(await readFile(file, 'utf8'), '{}\n', 'undo does not write an invalid intermediate state');
+    screen = ''; input.write('\x19'); await waitFor(() => screen.includes('Redone.'));
+    input.write('\x13'); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), '{"audio":true}\n');
+    screen = ''; input.write('\x1a'); await waitFor(() => screen.includes('Undone.'));
+    screen = ''; input.write('\x1a'); await waitFor(() => screen.includes('Undone.'));
+    input.write('\x13'); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), '{}\n', 'typed characters undo as one edit');
+    screen = ''; input.write('\x19'); await waitFor(() => screen.includes('Redone.'));
+    screen = ''; input.write('\x19'); await waitFor(() => screen.includes('Redone.'));
+    input.write('\x13'); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), '{"audio":true}\n');
+    screen = ''; input.write('\x1a'); await waitFor(() => screen.includes('Undone.'));
+    input.write('false');
+    input.write('\x19'); await waitFor(() => screen.includes('Nothing to redo.'));
+    input.write('\x13'); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), '{"audio":false}\n', 'a new edit clears the redo history');
+    pasteText = '{"quality":"best"}';
+    input.write('\x01');
+    screen = ''; input.write('\x16'); await waitFor(() => screen.includes('Config OK'));
+    screen = ''; input.write('\x1a'); await waitFor(() => screen.includes('Undone.'));
+    input.write('\x13'); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), '{"audio":false}\n', 'undo restores text replaced by paste');
+    screen = ''; input.write('\x19'); await waitFor(() => screen.includes('Redone.'));
+    input.write('\x13'); await waitFor(() => screen.includes('Saved'));
+    assert.equal(await readFile(file, 'utf8'), pasteText);
+    input.write('\x1b'); await session;
+    assert.equal(input.isRaw, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('dragging at viewport edges scrolls and extends selection until release', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'veo-editor-drag-scroll-'));
+  const file = path.join(dir, 'config.json');
+  const input = new PassThrough(), output = new PassThrough();
+  input.isTTY = output.isTTY = true;
+  input.setRawMode = value => { input.isRaw = value; };
+  output.columns = 85; output.rows = 12;
+  let screen = '', copied = '';
+  output.on('data', chunk => { screen += chunk; });
+  const waitFor = async condition => {
+    for (let i = 0; i < 200; i++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
+    throw new Error(`Editor did not reach expected state: copied=${JSON.stringify(copied)} screen=${screen.slice(-400)}`);
+  };
+  try {
+    const lines = Array.from({ length: 25 }, (_, i) => `// line ${i}`);
+    await writeFile(file, lines.join('\n') + '\n{}\n');
+    const session = editConfig(file, { input, output, clipboard: { copy: async value => { copied = value; }, paste: async () => '' } });
+    await waitFor(() => /Ctrl\+Z.*Undo/.test(screen));
+    screen = '';
+    input.write('\x1b[<0;5;3M\x1b[<32;5;9M');
+    await waitFor(() => /line 10/.test(screen));
+    input.write('\x1b[<0;5;9m\x03');
+    await waitFor(() => copied.includes('line 9'));
+    assert.match(copied, /line 1[\s\S]*line 9/);
+    screen = '';
+    await new Promise(resolve => setTimeout(resolve, 220));
+    assert.equal(screen, '', 'released drag does not keep scrolling');
+
+    input.write('\x1b[<65;2;3M\x1b[<65;2;3M\x1b[<65;2;3M');
+    screen = '';
+    input.write('\x1b[<0;5;8M\x1b[<32;5;2M');
+    await waitFor(() => /line 0/.test(screen));
+    input.write('\x1b[<0;5;2m');
+    copied = '';
+    input.write('\x03'); await waitFor(() => copied !== '');
+    assert.match(copied, /line 0[\s\S]*line/);
+    input.write('\x1b'); await session;
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

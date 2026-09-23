@@ -291,11 +291,19 @@ async function downloadBackend({ asset, release, expected, directory, signal, st
   }
 }
 
-async function acquire(asset, directory, signal, status) {
+async function acquire(asset, directory, signal, status, statusDone = () => {}) {
   const destination = path.join(directory, `yt-dlp${exeSuffix()}`);
   const expected = HASHES[asset];
   status('Checking yt-dlp…');
-  if (await matches(destination, expected, signal)) {
+  let cached;
+  try {
+    cached = await matches(destination, expected, signal);
+    statusDone('Checking yt-dlp…', 'done');
+  } catch (error) {
+    if (!signal?.aborted && error?.name !== 'AbortError') statusDone('Checking yt-dlp…', 'failed');
+    throw error;
+  }
+  if (cached) {
     if (process.platform !== 'win32') await chmod(destination, 0o755);
     return destination;
   }
@@ -330,7 +338,6 @@ async function managedMediaTools({ signal, status, directory }) {
   } catch (cause) {
     return `the bundled static media tools are unusable (${cause.message})`;
   }
-  status('Preparing ffmpeg and ffprobe…');
   const suffix = exeSuffix();
   await stage(ffmpeg, path.join(directory, `ffmpeg${suffix}`), signal);
   await stage(ffprobe, path.join(directory, `ffprobe${suffix}`), signal);
@@ -343,38 +350,58 @@ async function managedMediaTools({ signal, status, directory }) {
  * then a system installation (which is what Windows on ARM needs, because
  * ffmpeg-static and ffprobe-static ship no arm64 Windows binaries).
  */
-export async function resolveMediaTools({ signal, status = () => {}, directory, offline = false,
+export async function resolveMediaTools({ signal, status = () => {}, statusDone = () => {}, directory, offline = false,
   find = findOnPath, managed = managedMediaTools, install = installMediaTools } = {}) {
-  const suffix = exeSuffix();
-  const override = envPath('VEO_FFMPEG_PATH');
-  if (override) {
-    await executable(path.join(override, `ffmpeg${suffix}`), 'VEO_FFMPEG_PATH ffmpeg');
-    await executable(path.join(override, `ffprobe${suffix}`), 'VEO_FFMPEG_PATH ffprobe');
-    status('Using VEO_FFMPEG_PATH override.');
-    return override;
+  const preparing = 'Preparing ffmpeg and ffprobe…';
+  let currentStatus;
+  const report = message => { currentStatus = message; status(message); };
+  const finish = outcome => {
+    if (currentStatus !== preparing) report(preparing);
+    statusDone(preparing, outcome);
+  };
+  report(preparing);
+  try {
+    const suffix = exeSuffix();
+    const override = envPath('VEO_FFMPEG_PATH');
+    if (override) {
+      await executable(path.join(override, `ffmpeg${suffix}`), 'VEO_FFMPEG_PATH ffmpeg');
+      await executable(path.join(override, `ffprobe${suffix}`), 'VEO_FFMPEG_PATH ffprobe');
+      finish('done');
+      report('Using VEO_FFMPEG_PATH override.');
+      return override;
+    }
+    const problem = await managed({ signal, status: report, directory });
+    if (!problem) { finish('done'); return directory; }
+    // A previous run may already have staged a working pair into the cache.
+    if (await isExecutable(path.join(directory, `ffmpeg${suffix}`))
+      && await isExecutable(path.join(directory, `ffprobe${suffix}`))) { finish('done'); return directory; }
+    const ffmpeg = await find(['ffmpeg']);
+    const ffprobe = await find(['ffprobe']);
+    if (!ffmpeg || !ffprobe) {
+      if (!offline) {
+        const location = await install({ signal, status: report, directory, find, stage });
+        finish('done');
+        return location;
+      }
+      const missing = [!ffmpeg && 'ffmpeg', !ffprobe && 'ffprobe'].filter(Boolean).join(' and ');
+      throw new Error(`Cannot load media tools: ${problem}, and no ${missing} was found on PATH. `
+        + 'Run veo doctor fix without --offline to install them automatically, or set VEO_FFMPEG_PATH to a directory containing both binaries.');
+    }
+    // Same directory: yt-dlp can use it in place instead of duplicating ~150 MB.
+    if (path.dirname(ffmpeg) === path.dirname(ffprobe)) {
+      finish('done');
+      report(`Using the system ffmpeg in ${path.dirname(ffmpeg)}.`);
+      return path.dirname(ffmpeg);
+    }
+    report('Copying system ffmpeg and ffprobe into the backend cache…');
+    await stage(ffmpeg, path.join(directory, `ffmpeg${suffix}`), signal);
+    await stage(ffprobe, path.join(directory, `ffprobe${suffix}`), signal);
+    finish('done');
+    return directory;
+  } catch (error) {
+    if (!signal?.aborted && error?.name !== 'AbortError') finish('failed');
+    throw error;
   }
-  const problem = await managed({ signal, status, directory });
-  if (!problem) return directory;
-  // A previous run may already have staged a working pair into the cache.
-  if (await isExecutable(path.join(directory, `ffmpeg${suffix}`))
-    && await isExecutable(path.join(directory, `ffprobe${suffix}`))) return directory;
-  const ffmpeg = await find(['ffmpeg']);
-  const ffprobe = await find(['ffprobe']);
-  if (!ffmpeg || !ffprobe) {
-    if (!offline) return install({ signal, status, directory, find, stage });
-    const missing = [!ffmpeg && 'ffmpeg', !ffprobe && 'ffprobe'].filter(Boolean).join(' and ');
-    throw new Error(`Cannot load media tools: ${problem}, and no ${missing} was found on PATH. `
-      + 'Run veo doctor fix without --offline to install them automatically, or set VEO_FFMPEG_PATH to a directory containing both binaries.');
-  }
-  // Same directory: yt-dlp can use it in place instead of duplicating ~150 MB.
-  if (path.dirname(ffmpeg) === path.dirname(ffprobe)) {
-    status(`Using the system ffmpeg in ${path.dirname(ffmpeg)}.`);
-    return path.dirname(ffmpeg);
-  }
-  status('Copying system ffmpeg and ffprobe into the backend cache…');
-  await stage(ffmpeg, path.join(directory, `ffmpeg${suffix}`), signal);
-  await stage(ffprobe, path.join(directory, `ffprobe${suffix}`), signal);
-  return directory;
 }
 
 /**
@@ -457,12 +484,13 @@ export async function inspectBackend({ signal, platform = process.platform, arch
  * cannot serve the current platform (notably Windows on ARM).
  * onStatus receives plain strings. Throws on cancellation or acquisition failure.
  */
-export async function resolveBackend({ signal, onStatus, offline = false, platform = process.platform, find = findOnPath,
+export async function resolveBackend({ signal, onStatus, onStatusDone, offline = false, platform = process.platform, find = findOnPath,
   setupTermux = installTermuxTools, hasEjs = hasTermuxEjs, run = runSetup } = {}) {
   if (signal !== undefined && !(signal instanceof AbortSignal)) throw new TypeError('signal must be an AbortSignal.');
   if (onStatus !== undefined && typeof onStatus !== 'function') throw new TypeError('onStatus must be a function.');
   signal?.throwIfAborted();
   const status = onStatus || (() => {});
+  const statusDone = onStatusDone || (() => {});
   const ytOverride = envPath('VEO_YT_DLP_PATH');
   if (platform === 'android') {
     const mediaOverride = envPath('VEO_FFMPEG_PATH');
@@ -508,13 +536,13 @@ export async function resolveBackend({ signal, onStatus, offline = false, platfo
   const installed = ytDlp ? null : await activeOverride(asset, { signal });
   const directory = cacheDirectory();
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const ffmpegLocation = await resolveMediaTools({ signal, status, directory, offline });
+  const ffmpegLocation = await resolveMediaTools({ signal, status, statusDone, directory, offline });
   if (ytDlp) status('Using VEO_YT_DLP_PATH override.');
   else if (installed) status(`Using the installed yt-dlp ${installed.release}.`);
   if (offline && !ytDlp && !installed && !await matches(path.join(directory, `yt-dlp${exeSuffix()}`), HASHES[asset], signal)) {
     throw new Error('yt-dlp is missing or damaged. Run veo doctor fix without --offline to download it.');
   }
-  const backend = ytDlp || installed?.path || await acquire(asset, directory, signal, status);
+  const backend = ytDlp || installed?.path || await acquire(asset, directory, signal, status, statusDone);
   signal?.throwIfAborted();
   return { ytDlp: backend, ffmpegLocation };
 }

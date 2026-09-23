@@ -7,6 +7,27 @@ import { runBackend } from '../src/downloader.js';
 
 const data = { stream: 'Media', downloaded_bytes: 90 * 1024 ** 2, total_bytes_estimate: 1024 ** 3, speed: 12.6 * 1024 ** 2, eta: 77 };
 
+test('non-default profile is white after a gray label only when terminal colors are enabled', () => {
+  const output = () => ({ isTTY: true, text: '', write(value) { this.text += value; } });
+  const terminal = output();
+  const reporter = createReporter(terminal, { setTitle() {}, env: {} });
+  reporter.profile('kino');
+  assert.equal(terminal.text, '\x1b[90mProfile: \x1b[0m\x1b[97mkino\x1b[0m\n');
+  terminal.text = '';
+  reporter.profile('default');
+  assert.equal(terminal.text, '\x1b[90mProfile: default\x1b[0m\n');
+  reporter.configure({ color: false });
+  terminal.text = '';
+  reporter.profile('kino');
+  assert.equal(terminal.text, 'Profile: kino\n');
+  const noColor = output();
+  createReporter(noColor, { setTitle() {}, env: { NO_COLOR: '1' } }).profile('kino');
+  assert.equal(noColor.text, 'Profile: kino\n');
+  const pipe = output(); pipe.isTTY = false;
+  createReporter(pipe, { setTitle() {}, env: {} }).profile('kino');
+  assert.equal(pipe.text, 'Profile: kino\n');
+});
+
 test('Termux progress stays within the terminal and reuses one line across resizing', () => {
   const output = { isTTY: true, columns: 60, text: '', write(text) { this.text += text; } };
   const wrapped = outputStream(output);
@@ -51,6 +72,78 @@ test('redirected output remains throttled and contains no terminal control codes
   for (let index = 0; index < 20; index++) reporter.progress(data);
   assert.equal(output.text.split('\n').filter(Boolean).length, 2);
   assert.doesNotMatch(output.text, /\x1b|\r/);
+});
+
+test('waiting status animates in place and processing replaces it with a colored result', async () => {
+  const output = { isTTY: true, columns: 80, text: '', write(text) { this.text += text; } };
+  const reporter = createReporter(output, { setTitle() {}, env: {} });
+  reporter.status('Reading video…');
+  await new Promise(resolve => setTimeout(resolve, 380));
+  assert.match(output.text, /Reading video\./);
+  assert.match(output.text, /Reading video\.\./);
+  assert.equal(output.text.includes('\n'), false);
+  reporter.processing({ postprocessor: 'MoveFiles', status: 'started' });
+  assert.equal(output.text.includes('\n'), false);
+  reporter.processing({ postprocessor: 'MoveFiles', status: 'finished' });
+  assert.match(output.text, /Preparing saved file: \x1b\[0m\x1b\[32mdone\x1b\[0m\n$/);
+  const settled = output.text;
+  await new Promise(resolve => setTimeout(resolve, 380));
+  assert.equal(output.text, settled);
+});
+
+test('failed processing is red with color and plain with no color', () => {
+  for (const color of [true, false]) {
+    const output = { isTTY: true, columns: 80, text: '', write(text) { this.text += text; } };
+    const reporter = createReporter(output, { setTitle() {}, env: {} });
+    reporter.configure({ color });
+    reporter.processing({ postprocessor: 'MoveFiles', status: 'started' });
+    reporter.processing({ postprocessor: 'MoveFiles', status: 'failed' });
+    assert.ok(output.text.endsWith(color ? 'Preparing saved file: \x1b[0m\x1b[31mfailed\x1b[0m\n' : 'Preparing saved file: failed\n'));
+    reporter.complete();
+  }
+});
+
+test('an active save failure replaces its animation without affecting another scoped item', () => {
+  const output = { isTTY: true, columns: 80, text: '', write(text) { this.text += text; } };
+  const reporter = createReporter(output, { setTitle() {}, env: {} });
+  const first = reporter.scoped(1, 2, 'First');
+  const second = reporter.scoped(2, 2, 'Second');
+  first.status('Reading video…');
+  second.processing({ postprocessor: 'MoveFiles', status: 'started' });
+  first.failStep();
+  assert.equal(output.text.includes('failed'), false);
+  second.failStep();
+  assert.match(output.text, /Second: Preparing saved file: \x1b\[0m\x1b\[31mfailed\x1b\[0m\n$/);
+  reporter.complete();
+});
+
+test('completed yt-dlp check and video read remain as separate lines', () => {
+  const output = { isTTY: true, columns: 80, text: '', write(text) { this.text += text; } };
+  const reporter = createReporter(output, { setTitle() {}, env: {} });
+  reporter.configure({ color: false });
+  reporter.status('Checking yt-dlp…');
+  reporter.finishStatus('Checking yt-dlp…', 'done');
+  reporter.status('Reading video…');
+  reporter.finishStatus('Reading video…', 'done');
+  const lines = output.text.trimEnd().split('\n');
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].endsWith('Checking yt-dlp: done'));
+  assert.ok(lines[1].endsWith('Reading video: done'));
+  reporter.status('Downloading…');
+  assert.ok(output.text.includes('Checking yt-dlp: done\n'));
+  assert.ok(output.text.includes('Reading video: done\n'));
+  reporter.finish();
+});
+
+test('yt-dlp check and video read use success and error colors when enabled', () => {
+  for (const label of ['Checking yt-dlp', 'Reading video']) for (const outcome of ['done', 'failed']) {
+    const output = { isTTY: true, columns: 80, text: '', write(text) { this.text += text; } };
+    const reporter = createReporter(output, { setTitle() {}, env: {} });
+    reporter.status(`${label}…`);
+    reporter.finishStatus(`${label}…`, outcome);
+    assert.ok(output.text.endsWith(`${label}: \x1b[0m\x1b[${outcome === 'done' ? 32 : 31}m${outcome}\x1b[0m\n`));
+    reporter.finish();
+  }
 });
 
 test('download errors select the final backend failure and retain HTTP status', async () => {

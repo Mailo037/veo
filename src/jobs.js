@@ -1,4 +1,4 @@
-import { runPool, serialQueue, reducedLimit } from './execution.js';
+import { runPool, serialQueue, reducedLimit, formatTimings } from './execution.js';
 import { styleText } from './progress.js';
 import path from 'node:path';
 import { lstat, readdir } from 'node:fs/promises';
@@ -126,14 +126,14 @@ export async function runJob(options, { download, reporter, signal, openFile, st
           skipped += result.skipped ?? 0;
           failed += result.failures?.length ?? (item.status === 'failed' ? 1 : 0);
         }
-        if (options.json) stdout.write(`${JSON.stringify({ ...result, status: item.status, ...(runId ? { runId } : {}) })}\n`);
+        if (options.json) stdout.write(`${JSON.stringify({ ...result, status: item.status, profile: request.profile || null, ...(runId ? { runId } : {}) })}\n`);
         await publish(result.files);
       } catch (error) {
         item.status = signal?.aborted ? 'cancelled' : 'failed';
         item.error = readableError(error);
         if (!signal?.aborted) failed++;
         item.files = item.entries.flatMap(entry => entry.files || []);
-        if (options.json) stdout.write(`${JSON.stringify({ url: request.url, status: item.status, error: item.error, files: item.files, ...(runId ? { runId } : {}) })}\n`);
+        if (options.json) stdout.write(`${JSON.stringify({ url: request.url, status: item.status, profile: request.profile || null, error: item.error, files: item.files, ...(runId ? { runId } : {}) })}\n`);
         else stderr.write(styleText(stderr, `veo: ${cleanText(request.url)}: ${item.error}`, 'error', options.color !== false) + '\n');
       }
       if (recordStats) {
@@ -165,7 +165,16 @@ export async function runJob(options, { download, reporter, signal, openFile, st
     stderr.write(`Run ID: ${runId}\n`);
   }
   const unfinished = job.items.some(item => !['saved', 'skipped'].includes(item.status));
-  stderr.write(styleText(stderr, `Summary: ${saved} saved, ${skipped} skipped, ${failed} failed${signal?.aborted ? ', cancelled' : ''}.`, unfinished ? 'error' : 'success', options.color !== false && !options.json) + '\n');
+  const downloadCount = job.items.reduce((count, item) => count + Math.max(1, item.entries?.length || 0), 0);
+  if (downloadCount > 1) stderr.write(styleText(stderr, `Summary: ${saved} saved, ${skipped} skipped, ${failed} failed${signal?.aborted ? ', cancelled' : ''}.`, unfinished ? 'error' : 'success', options.color !== false && !options.json) + '\n');
+  if (options.timings !== false) {
+    const totals = {};
+    for (const item of job.items) for (const timings of [item.timings, ...(item.entryTimings || []).map(entry => entry.timings)]) {
+      if (!timings) continue;
+      for (const [phase, ms] of Object.entries(timings)) totals[phase] = (totals[phase] || 0) + ms;
+    }
+    if (Object.keys(totals).length) stderr.write(styleText(stderr, formatTimings(totals), 'muted', options.color !== false && !options.json) + '\n');
+  }
   if (unfinished) stderr.write(`Retry failed/unfinished downloads: veo --retry-failed "${file}"\n`);
   if (unfinished) reporter.fail(Boolean(signal?.aborted)); else reporter.complete();
   return signal?.aborted ? 130 : unfinished ? 1 : 0;

@@ -22,6 +22,7 @@ const reporter = () => createReporter(sink(), { setTitle() {} });
 test('default profile applies automatically, explicit profiles replace it and flags win', async () => {
   const config = { open: true, profiles: { default: { quality: '720p', output: './everyday' }, music: { audio: true, format: 'mp3' } } };
   assert.equal(parseCli([url], { config }).quality, '720p');
+  assert.equal(parseCli([url], { config }).profile, 'default');
   assert.equal(parseCli([url, '--profile', 'default'], { config }).output, './everyday');
   assert.equal(parseCli([url, '-q', '1080p'], { config }).quality, '1080p');
   assert.equal(parseCli([url, '--no-open'], { config }).open, false);
@@ -175,12 +176,41 @@ test('jobs open successful files despite failure and retry only failed URLs with
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('single downloads show timing without a summary; multiple downloads show both', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-timing-summary-'));
+  const first = { setup: 1000, metadata: 2000 };
+  const second = { setup: 2000, metadata: 3000 };
+  try {
+    const single = sink();
+    await runJob({ urls: [url], output: directory }, { reporter: reporter(), stderr: single, stdout: sink(),
+      jobFile: path.join(directory, 'single.json'), download: async () => ({ status: 'saved', files: [], timings: first }) });
+    assert.doesNotMatch(single.text, /Summary:/);
+    assert.match(single.text, /Timing: setup 1\.0s \| metadata 2\.0s\n/);
+
+    const multiple = sink();
+    await runJob({ urls: [url, `${url}/second`], output: directory, concurrentDownloads: 1 }, {
+      reporter: reporter(), stderr: multiple, stdout: sink(), jobFile: path.join(directory, 'multiple.json'),
+      download: async request => ({ status: 'saved', files: [], timings: request.url === url ? first : second }),
+    });
+    assert.match(multiple.text, /Summary: 2 saved, 0 skipped, 0 failed\.\nTiming: setup 3\.0s \| metadata 5\.0s\n/);
+
+    const playlist = sink();
+    await runJob({ urls: [url], output: directory, playlist: true }, { reporter: reporter(), stderr: playlist, stdout: sink(),
+      jobFile: path.join(directory, 'playlist.json'), download: async (_, { onEntry }) => {
+        await onEntry({ index: 1, status: 'saved', files: [], timings: first });
+        await onEntry({ index: 2, status: 'saved', files: [], timings: second });
+        return { status: 'saved', saved: 2, files: [], entryTimings: [{ index: 1, timings: first }, { index: 2, timings: second }] };
+      } });
+    assert.match(playlist.text, /Summary: 2 saved, 0 skipped, 0 failed\.\nTiming: setup 3\.0s \| metadata 5\.0s\n/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('cancelled jobs retain completed playlist outputs and retry unfinished work', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-cancel-job-'));
   const stdout = sink(), stderr = sink(), controller = new AbortController();
   const jobFile = path.join(directory, 'job.json');
   try {
-    const code = await runJob({ urls: [url, `${url}/next`], output: directory, json: true, playlist: true, concurrentDownloads: 1 }, {
+    const code = await runJob({ urls: [url, `${url}/next`], output: directory, json: true, profile: 'music', playlist: true, concurrentDownloads: 1 }, {
       reporter: reporter(), stdout, stderr, jobFile, signal: controller.signal,
       download: async (_, { onEntry }) => {
         await onEntry({ index: 1, status: 'saved', files: ['first.mp4'] });
@@ -189,6 +219,7 @@ test('cancelled jobs retain completed playlist outputs and retry unfinished work
       } });
     assert.equal(code, 130);
     assert.equal(JSON.parse(stdout.text.trim()).status, 'cancelled');
+    assert.equal(JSON.parse(stdout.text.trim()).profile, 'music');
     assert.deepEqual(JSON.parse(stdout.text.trim()).files, ['first.mp4']);
     assert.match(stderr.text, /1 saved, 0 skipped, 0 failed/);
     assert.equal((await retryOptions(jobFile)).length, 2);

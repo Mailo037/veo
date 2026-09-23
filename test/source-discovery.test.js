@@ -68,48 +68,74 @@ test('scan timeout keeps candidates verified before the deadline', async () => {
   assert.equal(sources.timedOut, true);
 });
 
-test('a missing media result asks before source discovery and skips it when declined', async () => {
+test('a single verified media source is selected without a prompt', async () => {
   const page = 'https://site.test/movie/12';
   const media = 'https://cdn.test/master.m3u8';
   const source = { index: 1, title: 'Movie', source: 'cdn.test', type: 'HLS', quality: ['720p'], estimatedMiB: null, bitrateMbps: null, url: media };
   const questions = [];
-  const answers = ['yes', '1'];
   const options = { url: page, json: false };
   const result = await resolvePageSource(options, {
     stderr: { write() {} }, interactive: true,
-    ask: async prompt => { questions.push(prompt); return answers.shift(); },
+    ask: async prompt => { questions.push(prompt); throw new Error('Unexpected prompt'); },
     inspect: async request => { if (!request.mediaUrl) throw new Error('No video formats found'); return { formats: [{ height: 720 }] }; },
     discover: async (_page, { inspect }) => { await inspect(media); return [source]; },
   });
   assert.deepEqual(result, { mediaUrl: media, source: 1 });
-  assert.match(questions[0], /Search this page.*\(y\/N\)/);
-  assert.match(questions[1], /Source number/);
+  assert.deepEqual(questions, []);
   let discovered = false;
-  await assert.rejects(resolvePageSource(options, {
-    stderr: { write() {} }, interactive: true, ask: async () => 'n',
+  await assert.rejects(resolvePageSource({ ...options, autoListSources: false }, {
+    stderr: { write() {} }, interactive: true,
     inspect: async () => { throw new Error('No video formats found'); },
     discover: async () => { discovered = true; return []; },
-  }), /No video formats found/);
+  }), /Use --list-sources/);
   assert.equal(discovered, false);
 });
 
-test('scripts never receive a prompt and explicit list mode discovers directly', async () => {
+test('a master playlist and its variant are one selectable source', async () => {
+  const master = 'https://cdn.test/hls/film/master.m3u8?token=one';
+  const variant = 'https://cdn.test/hls/film/index_720x392.m3u8?token=two';
+  const sources = await discoverSources('https://site.test/film', {
+    capture: async () => [master, variant],
+    inspect: async url => url === master
+      ? { id: 'master', title: 'Film', formats: [{ url: variant, height: 392 }] }
+      : { id: 'index_720x392', title: 'Film', formats: [{ url: variant }] },
+  });
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].url, master);
+  assert.equal(sources[0].index, 1);
+});
+
+test('scripts automatically select one source; multiple sources require explicit selection', async () => {
   const page = 'https://site.test/movie/12';
   const source = { index: 1, title: 'Movie', source: 'cdn.test', type: 'HLS', quality: [], estimatedMiB: null, bitrateMbps: null, url: 'https://cdn.test/master.m3u8' };
   let asked = false;
   const common = { stderr: { write() {} }, interactive: false, ask: async () => { asked = true; return 'yes'; },
     inspect: async () => { throw new Error('No video formats found'); }, discover: async () => [source] };
-  await assert.rejects(resolvePageSource({ url: page, json: true }, common), /Use --list-sources/);
+  assert.deepEqual(await resolvePageSource({ url: page, json: true }, common), { mediaUrl: source.url, source: 1 });
   assert.equal(asked, false);
   const result = await resolvePageSource({ url: page, listSources: true, json: true }, common);
   assert.equal(result.sources.length, 1);
   assert.equal(asked, false);
   assert.equal(shouldOfferSourceDiscovery(new Error('No video formats found')), true);
   assert.equal(shouldOfferSourceDiscovery(new Error('HTTP Error 403')), false);
-  const automatic = await resolvePageSource({ url: page, autoListSources: true, json: true }, common);
+  const second = { ...source, index: 2, url: 'https://other.test/master.m3u8' };
+  const automatic = await resolvePageSource({ url: page, autoListSources: true, json: true }, { ...common, discover: async () => [source, second] });
   assert.equal(automatic.needsSelection, true);
-  assert.equal(automatic.sources.length, 1);
+  assert.equal(automatic.sources.length, 2);
   assert.equal(asked, false);
+});
+
+test('first source check passes the reporter into backend preparation', async () => {
+  const reporter = { status() {}, finishStatus() {} };
+  let received, prepared;
+  const backend = { ytDlp: 'fake', ffmpegLocation: '.' };
+  await resolvePageSource({ url: 'https://site.test/movie', listSources: true, json: true }, {
+    reporter, stderr: { write() {} }, interactive: false, onBackend: value => { prepared = value; },
+    backendResolver: async (_options, context) => { received = context.reporter; return backend; },
+    discover: async () => [],
+  });
+  assert.equal(received, reporter);
+  assert.equal(prepared, backend);
 });
 
 test('selected media URL reaches metadata and format listing with the original page as referer', async () => {
@@ -131,7 +157,7 @@ test('selected media URL reaches metadata and format listing with the original p
 test('interactive wizard chooses a discovered source while keeping the page URL for retry', async () => {
   const page = 'https://site.test/movie/12';
   const media = 'https://cdn.test/master.m3u8?token=temporary';
-  const answers = [page, 'video', 'y', '1', '', '', 'y', 'y'];
+  const answers = [page, 'video', '', '', 'y', 'y'];
   const output = { write() {} };
   const args = await interactiveArgs({}, {
     output, ask: async () => answers.shift(),
@@ -161,7 +187,7 @@ test('interactive wizard honors stored source-listing and automatic search defau
   assert.equal(parsed.timeoutMs, 120000);
 
   const media = 'https://cdn.test/master.m3u8';
-  const answers = [page, 'video', '1', '', '', 'y', 'y'];
+  const answers = [page, 'video', '', '', 'y', 'y'];
   const prompts = [];
   const downloadArgs = await interactiveArgs({ autoListSources: true }, {
     output: { write() {} }, ask: async prompt => { prompts.push(prompt); return answers.shift(); },
@@ -192,6 +218,19 @@ test('browser capture sees an XHR media URL after pressing Play', { skip: !brows
   } finally { server.close(); }
 });
 
+test('video read is marked complete only after metadata returns', async () => {
+  const events = [];
+  const reporter = { status: message => events.push(['start', message]), finishStatus: (message, outcome) => events.push(['finish', message, outcome]) };
+  const options = { url: 'https://site.test/movie', playlist: false };
+  await fetchMetadata(options, { backend: { ytDlp: 'fake', ffmpegLocation: '.' }, reporter,
+    runner: async () => { events.push(['runner']); return JSON.stringify({ id: 'movie', formats: [{ height: 720 }] }); } });
+  assert.deepEqual(events, [['start', 'Reading video…'], ['runner'], ['finish', 'Reading video…', 'done']]);
+  events.length = 0;
+  await assert.rejects(fetchMetadata(options, { backend: { ytDlp: 'fake', ffmpegLocation: '.' }, reporter,
+    runner: async () => { throw new Error('Metadata unavailable'); } }), /Metadata unavailable/);
+  assert.deepEqual(events, [['start', 'Reading video…'], ['finish', 'Reading video…', 'failed']]);
+});
+
 test('browser capture keeps checking for a delayed play overlay inside a frame', { skip: !browserCandidates().some(existsSync) }, async () => {
   const server = createServer((request, response) => {
     if (request.url === '/movie/delayed') {
@@ -199,7 +238,7 @@ test('browser capture keeps checking for a delayed play overlay inside a frame',
       response.end('<iframe src="/player" style="width:600px;height:300px"></iframe>');
     } else if (request.url === '/player') {
       response.writeHead(200, { 'content-type': 'text/html' });
-      response.end('<script>setTimeout(() => { const play = document.createElement("div"); play.className = "play-button"; play.style = "width:80px;height:50px"; play.onclick = () => fetch("/api/source"); document.body.append(play); }, 900)</script>');
+      response.end('<script>setTimeout(() => { const play = document.createElement("div"); play.className = "play-button"; play.style = "width:80px;height:50px"; play.onclick = () => fetch("/api/source"); document.body.append(play); }, 150)</script>');
     } else if (request.url === '/api/source') {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ stream: `http://127.0.0.1:${server.address().port}/stream/delayed.m3u8` }));
@@ -207,7 +246,7 @@ test('browser capture keeps checking for a delayed play overlay inside a frame',
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    const urls = await captureBrowserMedia(`http://127.0.0.1:${server.address().port}/movie/delayed`, { observeMs: 4500 });
+    const urls = await captureBrowserMedia(`http://127.0.0.1:${server.address().port}/movie/delayed`, { observeMs: 10000 });
     assert.ok(urls.some(url => url.endsWith('/stream/delayed.m3u8')));
   } finally { server.close(); }
 });

@@ -11,9 +11,11 @@ veo inspect "./downloads/video.mp4" --check-audio --json
 ```
 
 For a page with an embedded player that the normal extractor cannot identify,
-run `veo "<page-url>" --list-sources --json` and choose an `index` from the
-returned `sources`. Then use `veo "<page-url>" --source <index> --dry-run --json`
-before the download. Source discovery opens a temporary headless Chromium-based
+`veo "<page-url>" --dry-run --json` searches for playable media automatically.
+It uses a single verified source without a second command. If several sources
+are found, run `veo "<page-url>" --list-sources --json` and choose an `index`,
+then use `veo "<page-url>" --source <index> --dry-run --json` before downloading.
+Source discovery opens a temporary headless Chromium-based
 browser, repeatedly checks for Play controls, and observes media requests after
 interaction. It needs Chrome, Edge or Chromium,
 or `VEO_BROWSER_PATH`. A found source is verified by the backend; size may be

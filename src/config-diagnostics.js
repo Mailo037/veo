@@ -1,4 +1,4 @@
-import { CONFIG_KEYS, parseConfigText, effectiveConfig, applyProfile } from './config.js';
+import { CONFIG_KEYS, RESERVED_PROFILE_NAMES, parseConfigText, effectiveConfig, applyProfile } from './config.js';
 import { stripConfigComments } from './config-template.js';
 import { QUALITIES, AUDIO_FORMATS, VIDEO_FORMATS } from './utils.js';
 
@@ -75,7 +75,7 @@ export async function semanticIssue(text) {
   if (!object(data)) return located(text, node([]), 'The config must contain a JSON object.');
   const check = (settings, path) => {
     for (const [key, value] of Object.entries(settings)) {
-      if (!path.length && ['$schema', 'profiles'].includes(key)) continue;
+      if (!path.length && ['$schema', 'profiles', 'activeProfile'].includes(key)) continue;
       const target = node([...path, key]);
       if (!Object.hasOwn(CONFIG_KEYS, key)) {
         const proposed = suggestion(key, path.length ? keys : [...keys, 'profiles', '$schema']);
@@ -93,8 +93,17 @@ export async function semanticIssue(text) {
   if (Object.hasOwn(data, 'profiles')) {
     if (!object(data.profiles)) return located(text, node(['profiles']), 'Profiles must be an object.');
     for (const [name, profile] of Object.entries(data.profiles)) {
+      if (RESERVED_PROFILE_NAMES.includes(name)) {
+        return located(text, node(['profiles', name]), `Profile name "${name}" is reserved for veo profile ${name}. Rename this profile.`, true);
+      }
       if (!object(profile)) return located(text, node(['profiles', name]), `Profile "${name}" must be an object.`);
       issue = check(profile, ['profiles', name]); if (issue) return issue;
+    }
+  }
+  if (Object.hasOwn(data, 'activeProfile')) {
+    if (typeof data.activeProfile !== 'string' || !data.activeProfile) return located(text, node(['activeProfile']), '"activeProfile" must be a non-empty profile name.');
+    if (!object(data.profiles) || !Object.hasOwn(data.profiles, data.activeProfile)) {
+      return located(text, node(['activeProfile']), `Unknown active profile "${data.activeProfile}". Choose: ${Object.keys(data.profiles || {}).join(', ') || 'none'}.`, false, Object.keys(data.profiles || {}));
     }
   }
   const { config } = parseConfigText(text);
@@ -105,7 +114,7 @@ export async function semanticIssue(text) {
       let key = /Invalid quality/.test(message) ? 'quality' : /Invalid (?:audio|video) format/.test(message) ? 'format' :
         /output directory/.test(message) ? 'output' : /custom filename/.test(message) ? 'rename' :
           /--([a-z-]+)/.exec(message)?.[1]?.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-      const name = profile ?? (config.profiles?.default ? 'default' : undefined);
+      const name = profile ?? config.activeProfile ?? (config.profiles?.default ? 'default' : undefined);
       const selected = applyProfile(config, profile);
       // Template errors do not name the CLI option. Locate the failing template.
       if (!key) {
@@ -134,7 +143,8 @@ export function editorCompletions(text, cursor) {
       const key = path.at(-1), property = cursor >= item.keyStart && cursor <= item.keyEnd;
       if (!property && !(cursor >= item.start && cursor <= item.end)) continue;
       const profile = path.length === 3 ? path[1] : undefined;
-      const choices = property ? (path.length === 1 ? [...keys, 'profiles', '$schema'] : keys) : valueChoices(key, applyProfile(data, profile));
+      const choices = property ? (path.length === 1 ? [...keys, 'profiles', 'activeProfile', '$schema'] : keys) :
+        key === 'activeProfile' ? Object.keys(data.profiles || {}) : valueChoices(key, applyProfile(data, profile));
       if (!choices.length) return null;
       const proposed = property ? suggestion(key, choices) : null;
       return { start: property ? item.keyStart : item.start, end: property ? item.keyEnd : item.end,

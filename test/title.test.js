@@ -19,7 +19,7 @@ test('parallel playlist progress keeps each title and stream attached to its ent
   second.processing({ postprocessor: 'VideoRemuxer', status: 'finished' });
   assert.match(output.output, /\[2\/2\] Second: Audio/);
   assert.match(output.output, /\[1\/2\] Renamed first: Video/);
-  assert.match(output.output, /\[2\/2\] Second: Changing video container: done/);
+  assert.match(output.output, /\[2\/2\] Second: Changing video container:.*done/);
 });
 
 test('rename accepts short/long flags and rejects empty names', () => {

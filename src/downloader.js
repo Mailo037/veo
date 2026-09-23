@@ -1,5 +1,5 @@
 import { ensureCompatibility } from './compatibility.js';
-import { adaptiveRun, reducedLimit, phaseTimer, formatTimings } from './execution.js';
+import { adaptiveRun, reducedLimit, phaseTimer } from './execution.js';
 import { mediaDestination, prepareDestination } from './naming.js';
 import { estimateMediaBytes, reserveSpace } from './disk-space.js';
 import { spawn } from 'node:child_process';
@@ -288,19 +288,25 @@ export async function fetchMetadata(options, { signal, backend, runner, reporter
   const args = [...common, '--dump-single-json', '--skip-download'];
   if (options.playlist && !options._entryIndex) args.push('--flat-playlist');
   args.push('--', options.mediaUrl || options.url);
-  let metadata = JSON.parse(await runner(backend.ytDlp, args, { signal }));
-  if (options._entryIndex && metadata.entries) metadata = metadata.entries.find(Boolean);
-  if (!metadata) throw new Error('The selected playlist entry is unavailable.');
-  if (!options.playlist && (metadata._type === 'playlist' || metadata.entries)) {
-    throw new Error('This URL is a collection. Add --playlist to download every entry.');
+  try {
+    let metadata = JSON.parse(await runner(backend.ytDlp, args, { signal }));
+    if (options._entryIndex && metadata.entries) metadata = metadata.entries.find(Boolean);
+    if (!metadata) throw new Error('The selected playlist entry is unavailable.');
+    if (!options.playlist && (metadata._type === 'playlist' || metadata.entries)) {
+      throw new Error('This URL is a collection. Add --playlist to download every entry.');
+    }
+    if (metadata.is_live) throw new Error('Live streams are not supported. Please use a finished video.');
+    if (metadata.has_drm) throw new Error('This content is DRM-protected.');
+    reporter?.finishStatus?.('Reading video…', 'done');
+    return metadata;
+  } catch (error) {
+    if (!signal?.aborted && error?.name !== 'AbortError') reporter?.finishStatus?.('Reading video…', 'failed');
+    throw error;
   }
-  if (metadata.is_live) throw new Error('Live streams are not supported. Please use a finished video.');
-  if (metadata.has_drm) throw new Error('This content is DRM-protected.');
-  return metadata;
 }
 
 export async function prepareBackend(options, { signal, backendResolver = resolveBackend, reporter } = {}) {
-  return backendResolver({ signal, onStatus: message => reporter?.status(message) });
+  return backendResolver({ signal, onStatus: message => reporter?.status(message), onStatusDone: (message, outcome) => reporter?.finishStatus?.(message, outcome) });
 }
 
 /** The extension the finished file will most likely have, for previews. */
@@ -413,7 +419,7 @@ export async function download(options, { signal, reporter, backendResolver = re
   const timer = phaseTimer(now);
   const timingResult = () => {
     if (options.timings === false) return {};
-    const timings = timer.result(); reporter?.status(formatTimings(timings)); return { timings };
+    return { timings: timer.result() };
   };
   let directory = path.resolve(options.output);
   localRoot = path.resolve(localRoot);
@@ -549,6 +555,7 @@ export async function download(options, { signal, reporter, backendResolver = re
     await writeJson(historyFile, { version: 1, source: sourceKey(metadata, options.url), settings: downloadSettings(options), files });
     return { url: options.url, title: metadata.title || metadata.id || 'video', files, status: 'saved', saved: 1, skipped: 0, ...timingResult() };
   } catch (error) {
+    if (!signal?.aborted) reporter?.failStep?.();
     // A kept staging directory is the whole point of --resume, and cancellation
     // is the most common reason to want one.
     keepPartial = Boolean(options.resume || manifest?.ready?.length || unconfirmedOutput);

@@ -5,7 +5,7 @@ const PROCESSING_LABELS = { Merger: 'Merging audio/video', VideoRemuxer: 'Changi
 
 export function styleText(stream, text, role = 'muted', enabled = true, env = process.env) {
   if (!enabled || !stream.isTTY || Object.hasOwn(env, 'NO_COLOR') || env.TERM === 'dumb') return text;
-  const codes = { muted: 90, title: 1, success: 32, error: 31 };
+  const codes = { muted: 90, title: 1, profile: 97, success: 32, error: 31 };
   return '\x1b[' + (codes[role] || 90) + 'm' + text + '\x1b[0m';
 }
 
@@ -56,10 +56,10 @@ export function formatProgress(data, { columns = Infinity, prefix = '' } = {}) {
   return fit(variants.at(-1), columns);
 }
 
-export function createReporter(stream = process.stderr, { setTitle = createTerminalTitle(stream) } = {}) {
+export function createReporter(stream = process.stderr, { setTitle = createTerminalTitle(stream), env = process.env } = {}) {
   let color = true;
-  const muted = text => styleText(stream, text, 'muted', color);
-  const heading = text => styleText(stream, text, 'title', color);
+  const muted = text => styleText(stream, text, 'muted', color, env);
+  const heading = text => styleText(stream, text, 'title', color, env);
   let active = false;
   let lastLog = 0;
   let name = '';
@@ -68,27 +68,64 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
   let position = '';
   let hasItem = false;
   let streamName = '';
+  let animation;
+  let animationLabel = '';
+  let animationOwner;
+  let animationFrame = 0;
+  const stopAnimation = () => { if (animation) clearInterval(animation); animation = undefined; };
+  const display = value => fit(value, stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity);
+  const animate = (label, owner) => {
+    clear();
+    if (!stream.isTTY) { stream.write(muted(label + '…') + '\n'); return; }
+    animationLabel = label;
+    animationOwner = owner;
+    animationFrame = 0;
+    const tick = () => { stream.write(`\r\x1b[2K${muted(display(animationLabel + '.'.repeat(animationFrame % 3 + 1)))}`); active = true; animationFrame++; };
+    tick();
+    animation = setInterval(tick, 350);
+    animation.unref?.();
+  };
+  const processingResult = (label, status) => {
+    clear();
+    const failed = status === 'failed' || status === 'error';
+    const suffix = failed ? 'failed' : 'done';
+    const width = stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity;
+    const result = `${fit(label, Math.max(0, width - suffix.length - 2))}: `;
+    stream.write(muted(result) + styleText(stream, suffix, failed ? 'error' : 'success', color, env) + '\n');
+  };
+  const finishStatus = (message, owner, prefix = '', outcome) => {
+    const label = prefix + cleanText(message);
+    if (!animation || animationOwner !== owner || animationLabel !== label.slice(0, -1)) return;
+    if (outcome) { processingResult(label.slice(0, -1), outcome); return; }
+    clear();
+    stream.write(muted(display(label)) + '\n');
+  };
   const line = (data, prefix) => formatProgress(data, { prefix, columns: stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity });
   const draw = (data, prefix) => { stream.write(`\r\x1b[2K${line(data, prefix)}`); active = true; };
   const updateTitle = () => setTitle(`veo | ${phase}${name ? ` | ${name}` : ''}`);
   function clear() {
+    stopAnimation();
     if (active && stream.isTTY) stream.write('\r\x1b[2K');
     active = false;
+    animationLabel = '';
+    animationOwner = undefined;
   }
   const scoped = (index, total, title, parent = '') => {
     let childName = cleanText(title), lastProgress = 0;
+    const owner = Symbol('scoped reporter');
     const prefix = parent + '[' + index + '/' + total + '] ';
     const log = (message, quiet = true) => {
-      clear();
-      const line = prefix + childName + ': ' + cleanText(message);
-      stream.write((quiet ? muted(line) : line) + '\n');
       phase = cleanText(message); name = childName;
+      const line = prefix + childName + ': ' + phase;
+      if (phase.endsWith('…')) animate(line.slice(0, -1), owner);
+      else { clear(); stream.write((quiet ? muted(line) : line) + '\n'); }
       if (started) updateTitle();
     };
     return {
       scoped: (index, total, title) => scoped(index, total, title, prefix),
       name(value) { childName = cleanText(value); },
       status: log,
+      finishStatus(message, outcome) { finishStatus(message, owner, prefix + childName + ': ', outcome); },
       progress(data) {
         if (stream.isTTY) {
           draw(data, prefix + childName + ': ' + (data.stream || 'Media'));
@@ -97,8 +134,15 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
           lastProgress = Date.now();
         }
       },
-      processing(data) { log((PROCESSING_LABELS[data.postprocessor] || 'Processing media') + (data.status === 'finished' ? ': done' : '…')); },
+      processing(data) {
+        const label = prefix + childName + ': ' + (PROCESSING_LABELS[data.postprocessor] || 'Processing media');
+        if (['finished', 'failed', 'error'].includes(data.status)) processingResult(label, data.status);
+        else animate(label, owner);
+        phase = `${PROCESSING_LABELS[data.postprocessor] || 'Processing media'}${data.status === 'finished' ? ': done' : '…'}`;
+        name = childName; if (started) updateTitle();
+      },
       finish() {},
+      failStep() { if (animation && animationOwner === owner) processingResult(animationLabel, 'failed'); },
     };
   };
   return {
@@ -112,9 +156,10 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     processing(data) {
       const processor = cleanText(data.postprocessor || 'Processing');
       const label = PROCESSING_LABELS[processor] || 'Processing media';
-      clear(); phase = `${label}${data.status === 'finished' ? ': done' : '…'}`;
+      phase = `${label}${data.status === 'finished' ? ': done' : '…'}`;
       if (started) updateTitle();
-      stream.write(muted(`${position}${phase}`) + '\n');
+      if (['finished', 'failed', 'error'].includes(data.status)) processingResult(`${position}${label}`, data.status);
+      else animate(`${position}${label}`);
     },
     start(title = '') { started = true; name = cleanText(title); phase = 'Starting…'; updateTitle(); },
     name(title) {
@@ -123,11 +168,22 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
       name = next; if (started) updateTitle();
     },
     status(message) {
-      clear();
       phase = cleanText(message);
       if (started) updateTitle();
-      stream.write(muted(phase) + '\n');
+      if (phase.endsWith('…')) animate(phase.slice(0, -1));
+      else { clear(); stream.write(muted(phase) + '\n'); }
     },
+    profile(value) {
+      const selected = value ? cleanText(value) : 'global (no profile)';
+      phase = `Profile: ${selected}`;
+      if (started) updateTitle();
+      clear();
+      stream.write(value && value !== 'default'
+        ? muted('Profile: ') + styleText(stream, selected, 'profile', color, env) + '\n'
+        : muted(phase) + '\n');
+    },
+    finishStatus(message, outcome) { finishStatus(message, undefined, '', outcome); },
+    failStep() { if (animation && animationOwner === undefined) processingResult(animationLabel, 'failed'); },
     complete() { clear(); phase = 'Done'; if (started) updateTitle(); },
     fail(cancelled = false) { clear(); phase = cancelled ? 'Cancelled' : 'Failed'; if (started) updateTitle(); },
     progress(data) {

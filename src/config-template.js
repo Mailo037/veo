@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { translateLegacyConfigComments } from './legacy-config-comments.js';
 
 export const TEMPLATE_MARKER = '// veo: commented configuration template';
 
@@ -8,7 +7,7 @@ export const SOURCE_OPTIONS_GUIDE = String.raw`// veo: source discovery options 
 // "deepScan": true,          // Verify every observed media candidate instead of the first 30
 // "timeout": "2m",          // Discovery deadline: 5s to 10m; plain numbers mean seconds
 // "listSources": false,     // true = list sources and exit for single-URL calls
-// "autoListSources": false, // true = search after extraction fails, without a yes/no prompt
+// "autoListSources": true,  // Search after extraction fails; false disables fallback
 // Command-line flags override these values, including --no-deep-scan and --no-list-sources.
 `;
 
@@ -25,7 +24,7 @@ export const PROFILE_OPTIONS_GUIDE = String.raw`${PROFILE_OPTIONS_MARKER}
 // "deepScan": true,           // Check every observed source candidate
 // "timeout": "2m",           // Source-search deadline, 5s to 10m
 // "listSources": false,      // List sources and exit for one URL
-// "autoListSources": true,   // Search after extraction fails, without asking
+// "autoListSources": true,   // Search after extraction fails (default)
 // "playlist": true,            // Enable only for playlist downloads
 // "playlistConcurrency": 2,    // Simultaneous entries: 1-4; default 2
 // "checkSpace": true,          // Estimate free cache/output space first
@@ -97,6 +96,8 @@ ${SOURCE_OPTIONS_GUIDE}
   // "embedThumbnail": true,     // Embed the thumbnail
 
   // The default profile is used automatically unless you select another profile.
+  // Use veo profile NAME to make any named profile the default for future commands.
+  // The active choice is stored at the top level: "activeProfile": "music",
 ${PROFILE_OPTIONS_GUIDE}
   // Select other profiles with --profile NAME or in the interactive wizard.
   // Example: veo "https://example.com/video.mp4" --profile music
@@ -126,17 +127,61 @@ ${PROFILE_OPTIONS_GUIDE}
 }
 `;
 
-// The revision follows the template content, so future examples refresh without
-// maintaining a separate version number.
+// The guide revision follows its content so the editor can offer an update.
 const TEMPLATE_REVISION = createHash('sha256').update(TEMPLATE_SOURCE).digest('hex').slice(0, 12);
-const REVISION_LINE = `// veo: template revision ${TEMPLATE_REVISION}`;
 const REFERENCE_BEGIN = '// veo: template reference begin';
 const REFERENCE_END = '// veo: template reference end';
-export const CONFIG_TEMPLATE = TEMPLATE_SOURCE.replace(TEMPLATE_MARKER, `${TEMPLATE_MARKER}\n${REVISION_LINE}`);
+export const CONFIG_TEMPLATE = `{
+  "profiles": {
+    "default": {},
+    "kompatibel": { "audio": false, "format": "mp4", "compatible": true, "recode": false },
+    "music": { "audio": true, "format": "mp3" },
+    "archive": { "quality": "1080p", "embedMetadata": true, "subLangs": "de,en" }
+  }
+}
+`;
 
-function currentReference() {
-  const examples = CONFIG_TEMPLATE.split('\n').slice(2).map(line => `// ${line}`).join('\n');
-  return `${REFERENCE_BEGIN} ${TEMPLATE_REVISION}\n// This generated reference is refreshed when the template changes. Keep personal notes below it.\n// Current veo options: copy the settings you need below.\n${examples}\n${REFERENCE_END}`;
+// Kept in the program. It is inserted into a config only when requested.
+export const CONFIG_GUIDE = `${REFERENCE_BEGIN} ${TEMPLATE_REVISION}\n// Current veo options. Copy only the settings you want into the JSON below.\n${TEMPLATE_SOURCE.split('\n').slice(1).map(line => line.startsWith('//') ? line : `// ${line}`).join('\n').trimEnd()}\n${REFERENCE_END}\n`;
+
+function generatedRange(text) {
+  const begin = text.indexOf(REFERENCE_BEGIN);
+  const end = begin < 0 ? -1 : text.indexOf(REFERENCE_END, begin);
+  if (begin < 0) {
+    const legacyHeader = /^\uFEFF?\/\/ veo: commented configuration template\r?\n\/\/ Reference: copy any examples/;
+    const settingsMarker = '// Your existing settings:';
+    const markerAt = legacyHeader.test(text) ? text.indexOf(settingsMarker) : -1;
+    if (markerAt < 0) return null;
+    const lineEnd = text.indexOf('\n', markerAt);
+    return { start: 0, stop: lineEnd < 0 ? text.length : lineEnd + 1, revision: 'legacy' };
+  }
+  if (end < 0) return null;
+  let start = begin;
+  const before = text.slice(0, begin);
+  if (/^\uFEFF?\/\/ veo: commented configuration template\r?\n$/.test(before)) start = 0;
+  const lineEnd = text.indexOf('\n', end);
+  let stop = lineEnd < 0 ? text.length : lineEnd + 1;
+  if (text.slice(stop).startsWith('// Your existing settings:\n')) stop += '// Your existing settings:\n'.length;
+  return { start, stop, revision: text.slice(begin, text.indexOf('\n', begin) < 0 ? text.length : text.indexOf('\n', begin)) };
+}
+
+export function configGuideState(text) {
+  const range = generatedRange(text);
+  if (!range) return text.includes(REFERENCE_BEGIN) || text.includes('// Reference: copy any examples') ? 'incomplete' : 'absent';
+  return range.revision === `${REFERENCE_BEGIN} ${TEMPLATE_REVISION}` ? 'current' : 'outdated';
+}
+
+export function addConfigGuide(text) {
+  const range = generatedRange(text);
+  if (!range && configGuideState(text) === 'incomplete') return text;
+  const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
+  if (range) return (range.start === 0 ? bom : text.slice(0, range.start)) + CONFIG_GUIDE + text.slice(range.stop);
+  return bom + CONFIG_GUIDE + text.slice(bom.length);
+}
+
+export function removeConfigGuide(text) {
+  const range = generatedRange(text);
+  return range ? (range.start === 0 && text.startsWith('\uFEFF') ? '\uFEFF' : text.slice(0, range.start)) + text.slice(range.stop) : text;
 }
 
 // Remove comments only outside JSON strings. Whitespace replacement preserves
@@ -166,59 +211,4 @@ export function stripConfigComments(text) {
     } else result += char;
   }
   return result;
-}
-
-export function withConfigTemplate(text) {
-  text = translateLegacyConfigComments(text);
-  text = addDefaultProfile(text);
-  if (!text.replace(/^\uFEFF/, '').trim()) return CONFIG_TEMPLATE;
-  text = text.replace(/^\uFEFF/, '');
-  const reference = currentReference();
-  const begin = text.indexOf(REFERENCE_BEGIN);
-  const end = begin < 0 ? -1 : text.indexOf(REFERENCE_END, begin);
-  if (begin >= 0 && end < 0) return text; // Never replace an incomplete user-edited block.
-  if (begin >= 0 && end >= 0) {
-    if (text.slice(begin, end).startsWith(`${REFERENCE_BEGIN} ${TEMPLATE_REVISION}\n`)) return text;
-    const endOfLine = text.indexOf('\n', end);
-    const after = endOfLine < 0 ? text.length : endOfLine;
-    return text.slice(0, begin) + reference + text.slice(after);
-  }
-  if (text.startsWith(TEMPLATE_MARKER) && text.slice(0, 200).includes(REVISION_LINE)) return text;
-  if (text.startsWith(TEMPLATE_MARKER)) {
-    // Replace the older generated reference prefix, if present. Everything
-    // below the user's settings marker stays exactly as it was.
-    const settingsMarker = '// Your existing settings:';
-    const settingsAt = text.indexOf(settingsMarker);
-    if (text.includes('// Reference: copy any examples') && settingsAt >= 0) {
-      return `${TEMPLATE_MARKER}\n${reference}\n${text.slice(settingsAt)}`;
-    }
-    return text.replace(TEMPLATE_MARKER, `${TEMPLATE_MARKER}\n${reference}`);
-  }
-  return `${TEMPLATE_MARKER}\n${reference}\n// Your existing settings:\n${text}`;
-}
-
-function addDefaultProfile(text) {
-  // Insert only the missing profile, preserving user comments and formatting.
-  let clean, config;
-  try { clean = stripConfigComments(text); config = JSON.parse(clean); } catch { return text; }
-  if (!config || Array.isArray(config) || typeof config !== 'object') return text;
-  if (config.profiles && Object.hasOwn(config.profiles, 'default')) return text;
-  if (config.profiles !== undefined && (!config.profiles || Array.isArray(config.profiles) || typeof config.profiles !== 'object')) return text;
-  text = text.replace(/^\uFEFF/, '');
-  // Track depth to find the top-level profiles object, never a profile named profiles.
-  let depth = 0;
-  const tokens = /"(?:\\.|[^"\\])*"|[{}]/g;
-  for (const token of clean.matchAll(tokens)) {
-    if (token[0] === '{') depth++;
-    else if (token[0] === '}') depth--;
-    else if (depth === 1 && token[0] === '"profiles"') {
-      const after = token.index + token[0].length;
-      const match = /^\s*:\s*\{/.exec(clean.slice(after));
-      if (!match) continue;
-      const index = after + match[0].length;
-      return text.slice(0, index) + '\n    // Used automatically when no other profile is selected.\n    "default": {}' + (Object.keys(config.profiles).length ? ',' : '') + '\n' + text.slice(index);
-    }
-  }
-  const index = clean.indexOf('{') + 1;
-  return text.slice(0, index) + '\n  // Used automatically when no other profile is selected.\n  "profiles": { "default": {} }' + (Object.keys(config).length ? ',' : '') + '\n' + text.slice(index);
 }

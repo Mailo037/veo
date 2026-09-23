@@ -32,12 +32,13 @@ test('a registered run has a 6-character id, a live record and its resolved sett
 
       const job = jobFilePath(root);
       await first.describe({ urls: ['https://example.test/a', 'https://example.test/b'], output: path.join(root, 'out'),
-        audio: false, quality: '1080p', playlist: true, job });
+        audio: false, quality: '1080p', profile: 'music', playlist: true, job });
       const [run] = (await listRuns(root)).filter(item => item.id === first.id);
       assert.deepEqual(run.urls, ['https://example.test/a', 'https://example.test/b']);
       assert.equal(run.output, path.join(root, 'out'));
       assert.equal(run.media, 'video');
       assert.equal(run.quality, '1080p');
+      assert.equal(run.profile, 'music');
       assert.equal(run.playlist, true);
       assert.equal(run.job, job);
       assert.ok(Date.parse(run.startedAt) > 0);

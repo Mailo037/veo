@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, chmod, readdir, rm } from 'node:fs/promises'
 import path from 'node:path';
 import os from 'node:os';
 import { resolveBackend, resolveMediaTools } from '../src/backend.js';
+import { createReporter } from '../src/progress.js';
 import { runSetup, installTermuxTools, installMediaTools, mediaPackagePlan } from '../src/tool-setup.js';
 
 const status = () => {};
@@ -73,6 +74,27 @@ test('desktop missing-media fallback obeys offline, cache and system-tool preced
     await resolveMediaTools({ ...options, find: async names => path.join(directory, names[0]) });
     assert.equal(installs, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('media-tool preparation is reported before checking bundled tools', async () => {
+  const events = [];
+  await resolveMediaTools({ directory: '.', status: message => events.push(message),
+    managed: async () => { events.push('managed'); return null; } });
+  assert.deepEqual(events, ['Preparing ffmpeg and ffprobe…', 'managed']);
+});
+
+test('ffmpeg preparation animates and finishes with a colored result', async () => {
+  for (const outcome of ['done', 'failed']) {
+    const output = { isTTY: true, columns: 80, text: '', write(value) { this.text += value; } };
+    const reporter = createReporter(output, { setTitle() {}, env: {} });
+    const options = { directory: '.', status: message => reporter.status(message),
+      statusDone: (message, result) => reporter.finishStatus(message, result),
+      managed: async () => { if (outcome === 'failed') throw new Error('media tools unavailable'); return null; } };
+    if (outcome === 'failed') await assert.rejects(resolveMediaTools(options), /media tools unavailable/);
+    else await resolveMediaTools(options);
+    assert.match(output.text, /Preparing ffmpeg and ffprobe\./);
+    assert.ok(output.text.endsWith(`Preparing ffmpeg and ffprobe: \x1b[0m\x1b[${outcome === 'done' ? 32 : 31}m${outcome}\x1b[0m\n`));
+  }
 });
 
 test('desktop installer stages only probed binaries and cleans temporary npm files', async () => {

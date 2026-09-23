@@ -1,7 +1,7 @@
 import { outputStream, formatOutput } from './output.js';
 import { createInterface } from 'node:readline/promises';
 import { availableHeights, cleanText, validateUrl } from './utils.js';
-import { applyProfile } from './config.js';
+import { applyProfile, selectedProfileName } from './config.js';
 import { fetchMetadata, prepareBackend, runBackend } from './downloader.js';
 import { describeEstimate, selectedEntries, sizeEstimate, validateItems } from './playlist.js';
 
@@ -25,9 +25,9 @@ export async function interactiveArgs(config, { signal, input = process.stdin, o
     const profiles = Object.keys(config.profiles || {});
     let defaults = applyProfile(config);
     if (profiles.length) {
-      const hasDefault = profiles.includes('default');
-      const choices = hasDefault ? profiles : [...profiles, 'none'];
-      const fallback = hasDefault ? 'default' : 'none';
+      const selected = selectedProfileName(config);
+      const choices = selected ? profiles : [...profiles, 'none'];
+      const fallback = selected || 'none';
       const profile = await choose(`Profile (${choices.join(', ')}) [${fallback}]: `, choices, fallback);
       if (profile !== 'none') { args.push('--profile', profile); defaults = applyProfile(config, profile); }
     }
@@ -53,24 +53,24 @@ export async function interactiveArgs(config, { signal, input = process.stdin, o
     } catch (originalError) {
       const { discoverSources, formatSource, parseSourceTimeout, shouldOfferSourceDiscovery } = await import('./source-discovery.js');
       if (!shouldOfferSourceDiscovery(originalError)) throw originalError;
-      if (!defaults.autoListSources) {
-        const answer = (await question('No downloadable video found. Search this page for other sources? (y/N): ')).trim().toLowerCase();
-        if (!['y', 'yes'].includes(answer)) throw originalError;
-      }
+      if (defaults.autoListSources === false) throw originalError;
       const inspectSource = (mediaUrl, _page, { signal: scanSignal = signal } = {}) => inspect
         ? inspect({ ...inspectionOptions, playlist: false, mediaUrl }, scanSignal)
         : fetchMetadata({ ...inspectionOptions, playlist: false, mediaUrl }, { signal: scanSignal, backend, runner: runBackend });
       const sources = await (discover || discoverSources)(url, { signal, inspect: inspectSource,
         deepScan: defaults.deepScan, timeoutMs: defaults.timeout ? parseSourceTimeout(defaults.timeout) : undefined }).catch(() => []);
       if (!sources.length) throw originalError;
-      for (const source of sources) output.write(`${formatSource(source)}\n`);
-      let selection;
-      while (!selection) {
-        const answer = (await question('Source number: ')).trim();
-        const index = Number(answer);
-        if (/^[1-9]\d*$/.test(answer) && sources[index - 1]) selection = sources[index - 1];
-        else output.write(`Choose a number from 1 to ${sources.length}.\n`);
-      }
+      let selection = sources[0];
+      if (sources.length > 1) {
+        for (const source of sources) output.write(`${formatSource(source)}\n`);
+        selection = null;
+        while (!selection) {
+          const answer = (await question('Source number: ')).trim();
+          const index = Number(answer);
+          if (/^[1-9]\d*$/.test(answer) && sources[index - 1]) selection = sources[index - 1];
+          else output.write(`Choose a number from 1 to ${sources.length}.\n`);
+        }
+      } else output.write(`Found video source: ${formatSource(selection)}\n`);
       args.push('--source', String(selection.index));
       metadata = await inspectSource(selection.url);
     }

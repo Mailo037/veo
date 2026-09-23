@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline/promises';
 import { createReporter } from './progress.js';
 import { openFile } from './open-file.js';
 import { maybeUpdateNotice, updateMain, UPDATE_HELP, defaultRegistry, packageVersion } from './updater.js';
-import { applyProfile, configMain, loadConfig } from './config.js';
+import { applyProfile, configMain, loadConfig, profileMain, selectedProfileName } from './config.js';
 import { validateItems, describeEstimate } from './playlist.js';
 import { parseSourceTimeout } from './source-discovery.js';
 import { explainUnknownOption, optionSpellings, suggestOption } from './option-suggestions.js';
@@ -58,7 +58,7 @@ Options:
   --resume                 Keep partial data and continue an interrupted download
   --list-formats           Show the available formats and exit
   --list-sources           Find video sources loaded by a web page and exit
-  --auto-list-sources      Search automatically after no downloadable video is found
+  --auto-list-sources      Search after no video is found (default: on)
   --source <n>             Select source number from that page (also for scripts)
   --deep-scan              Check every media candidate found during source search
   --timeout <duration>     Source search deadline, e.g. 30, 30s or 2m (5s-10m)
@@ -89,7 +89,8 @@ Commands:
   veo alias list|add|remove  Manage extra command names (wrappers calling veo)
   veo uninstall [-p <name>]  Remove one alias, or everything with --yes
   veo version              Show the installed version
-  veo config edit|path|profiles|check|show|reset  Manage defaults and named profiles
+  veo config edit|path|profiles|guide|check|show|reset  Manage defaults and named profiles
+  veo profile [list|reset|name]  Show, list or change the default profile
   veo config edit [--external|--terminal]      Choose the configuration editor
 
 Run veo without arguments in a terminal for interactive setup.
@@ -198,7 +199,7 @@ export function optionDefaults(config = {}) {
     timeout: config.timeout,
     'deep-scan': config.deepScan ?? false,
     'list-sources': config.listSources ?? false,
-    'auto-list-sources': config.autoListSources ?? false,
+    'auto-list-sources': config.autoListSources ?? true,
   };
 }
 
@@ -226,6 +227,7 @@ const COMMAND_FLAGS = {
   alias: ['--json', '--force', '--bin-dir'],
   uninstall: ['--prefix', '-p', '--yes', '--keep-cache', '--keep-config', '--keep-aliases', '--json', '--bin-dir'],
   config: ['--profile', '--external', '--terminal'],
+  profile: [],
 };
 const COMMAND_NAMES = [...Object.keys(COMMAND_FLAGS), 'retry', 'help', 'version'];
 
@@ -259,6 +261,7 @@ export function parseCli(args, { config = {} } = {}) {
   let preliminary;
   try { preliminary = parseArgs({ args, allowPositionals: true, strict: true, allowNegative: true, options: cliOptions() }); }
   catch (error) { throw explainUnknownOption(error, cliOptions()); }
+  const profileName = selectedProfileName(config, preliminary.values.profile);
   config = applyProfile(config, preliminary.values.profile);
   let parsed;
   try { parsed = parseArgs({ args, tokens: true, allowNegative: true, allowPositionals: true, strict: true, options: cliOptions(config) }); }
@@ -344,6 +347,7 @@ export function parseCli(args, { config = {} } = {}) {
     options.subLangs = undefined;
     options.embedSubs = false;
   }
+  options.profile = profileName;
   return options;
 }
 
@@ -427,6 +431,10 @@ async function runMain(args, { config }) {
       args = ['--retry-failed', await latestFailedJob(), ...args.slice(2)];
     } catch (error) { stderr.write(`veo: ${readableError(error)}\n`); return 1; }
   }
+  if (args[0] === 'profile') {
+    try { return await profileMain(args.slice(1)); }
+    catch (error) { stderr.write(`veo: ${readableError(error)}\n`); return 1; }
+  }
   const { cleanupDownloadCache } = await import('./download-cache.js');
   await cleanupDownloadCache().catch(error => stderr.write(`veo: Could not clean expired local downloads: ${readableError(error)}\n`));
   // update/upgrade/up/check subcommands are handled before URL validation.
@@ -507,7 +515,14 @@ async function runMain(args, { config }) {
       retryItems = await retryOptions(options.retryFailed);
       // Revalidate stored options and apply only flags explicitly supplied now.
       const retryArgs = args.filter((arg, index) => arg !== '--retry-failed' && args[index - 1] !== '--retry-failed' && !arg.startsWith('--retry-failed='));
-      retryItems = retryItems.map(item => parseCli([item.url, ...retryArgs], { config: { ...item, profiles: loaded.config?.profiles } }));
+      const overrideProfile = retryArgs.some(arg => arg === '--profile' || arg.startsWith('--profile='));
+      retryItems = retryItems.map(item => {
+        const resumed = parseCli([item.url, ...retryArgs], { config: overrideProfile
+          ? { ...item, profiles: loaded.config?.profiles }
+          : item });
+        if (!overrideProfile) resumed.profile = item.profile;
+        return resumed;
+      });
       options = { ...retryItems[0], urls: retryItems.map(item => item.url) };
     }
     if (options.batchFile) {
@@ -522,16 +537,21 @@ async function runMain(args, { config }) {
     // follow this run's per-item progress with `veo runs <id>`.
     const jobFile = options.listFormats || options.listSources || options.dryRun ? null : jobFilePath();
     await run?.describe({ urls: options.urls, output: options.output ? path.resolve(options.output) : null,
-      audio: options.audio, quality: options.quality, format: options.format, playlist: options.playlist, job: jobFile });
+      audio: options.audio, quality: options.quality, format: options.format, profile: options.profile || null,
+      playlist: options.playlist, job: jobFile });
     reporter.configure?.({ color: options.color && !options.json });
     reporter.start(options.rename);
+    if (!options.dryRun && !options.listFormats && !options.listSources) reporter.profile(options.profile);
+    const preparedBackends = new Map();
+    const reuseBackend = request => preparedBackends.has(request.url) ? async () => preparedBackends.get(request.url) : undefined;
     const cookieWarning = cookieFileWarning(options.cookies);
     if (cookieWarning) stderr.write(`veo: ${cookieWarning}\n`);
 
     // For a single page, fall back to media requests observed while its player loads.
     // Explicit --source always rediscovers: signed media URLs can expire between runs.
     if (!retryItems && options.urls.length === 1 && (!options.playlist || options.listSources)) {
-      const discovery = await resolvePageSource(options, { signal: controller.signal, stderr });
+      const discovery = await resolvePageSource(options, { signal: controller.signal, stderr, reporter,
+        onBackend: backend => preparedBackends.set(options.url, backend) });
       if (options.listSources) {
         if (options.json) stdout.write(`${JSON.stringify({ url: options.url, status: 'sources', timedOut: Boolean(discovery.sources.timedOut), sources: discovery.sources.map(({ url, pageUrl, ...safe }) => safe) })}\n`);
         else for (const source of discovery.sources) stdout.write(`${discovery.formatSource(source)}\n`);
@@ -554,20 +574,21 @@ async function runMain(args, { config }) {
     }
     if (retryItems) for (const item of retryItems) {
       if (!item.source) continue;
-      const discovery = await resolvePageSource(item, { signal: controller.signal, stderr });
+      const discovery = await resolvePageSource(item, { signal: controller.signal, stderr, reporter,
+        onBackend: backend => preparedBackends.set(item.url, backend) });
       item.mediaUrl = discovery.mediaUrl;
     }
 
     if (options.listFormats) {
       const { listFormats } = await import('./downloader.js');
-      stdout.write(await listFormats(options, { signal: controller.signal, reporter }));
+      stdout.write(await listFormats(options, { signal: controller.signal, reporter, backendResolver: reuseBackend(options) }));
       return 0;
     }
     if (options.dryRun) {
       const { planDownload } = await import('./downloader.js');
       for (const request of retryItems || options.urls.map(url => ({ ...options, url }))) {
         const { url } = request;
-        const plan = await planDownload(request, { signal: controller.signal, reporter });
+        const plan = await planDownload(request, { signal: controller.signal, reporter, backendResolver: reuseBackend(request) });
         if (options.json) stdout.write(`${JSON.stringify({ url, status: 'planned', ...plan })}\n`);
         else {
           stdout.write(`URL: ${url}\n`);
@@ -581,7 +602,8 @@ async function runMain(args, { config }) {
     const { download } = await import('./downloader.js');
     const { createStatsRecorder } = await import('./stats.js');
     const { createHistoryRecorder } = await import('./history.js');
-    const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, jobFile: jobFile || undefined, runId: run?.id, recordStats: createStatsRecorder(), recordHistory: createHistoryRecorder() });
+    const result = await runJob(options, { download: (request, dependencies) => download(request, { ...dependencies, backendResolver: reuseBackend(request) }),
+      reporter, signal: controller.signal, openFile, items: retryItems, jobFile: jobFile || undefined, runId: run?.id, recordStats: createStatsRecorder(), recordHistory: createHistoryRecorder() });
     return result;
   } catch (error) {
     reporter.fail(controller.signal.aborted);
@@ -600,11 +622,12 @@ async function askSourceQuestion(prompt, signal) {
   finally { rl.close(); }
 }
 
-export async function resolvePageSource(options, { signal, stderr, inspect, discover, ask = askSourceQuestion,
+export async function resolvePageSource(options, { signal, stderr, reporter, onBackend, inspect, discover, ask = askSourceQuestion,
   backendResolver, interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY && !options.json) }) {
   const { fetchMetadata, prepareBackend, runBackend } = await import('./downloader.js');
   const { discoverSources, formatSource, shouldOfferSourceDiscovery } = await import('./source-discovery.js');
-  const backend = inspect ? null : await (backendResolver || prepareBackend)(options, { signal });
+  const backend = inspect ? null : await (backendResolver || prepareBackend)(options, { signal, reporter });
+  if (backend) onBackend?.(backend);
   const inspectMedia = (request, requestSignal = signal) => inspect ? inspect(request, requestSignal) : fetchMetadata(request, { signal: requestSignal, backend, runner: runBackend });
   let originalError;
   if (!options.source && !options.listSources) {
@@ -617,11 +640,8 @@ export async function resolvePageSource(options, { signal, stderr, inspect, disc
     }
     catch (error) { originalError = error; }
     if (!shouldOfferSourceDiscovery(originalError)) throw originalError;
-    if (!interactive && !options.autoListSources) throw new Error(`${originalError.message} Use --list-sources to search this page, then --source <number> to select one.`);
-    if (interactive && !options.autoListSources) {
-      const answer = (await ask('No downloadable video found. Search this page for other sources? (y/N): ', signal)).trim().toLowerCase();
-      if (!['y', 'yes'].includes(answer)) throw originalError;
-    }
+    if (options.autoListSources === false) throw new Error(`${originalError.message} Use --list-sources to search this page, then --source <number> to select one.`);
+    stderr.write('veo: No direct video found; searching the page for a playable source…\n');
   }
   let sources;
   try {
@@ -642,9 +662,11 @@ export async function resolvePageSource(options, { signal, stderr, inspect, disc
   }
   let index = Number(options.source);
   if (!index) {
-    if (!interactive && options.autoListSources) return { sources, formatSource, needsSelection: true };
+    if (sources.length === 1) index = 1;
+    else if (!interactive) return { sources, formatSource, needsSelection: true };
+  }
+  if (!index) {
     for (const source of sources) stderr.write(`${formatSource(source)}\n`);
-    if (!interactive) throw new Error('Select a source with --source <number>.');
     const answer = await ask('Source number (Enter to cancel): ', signal);
     if (!/^[1-9]\d*$/.test(answer.trim())) throw new Error('No source selected.');
     index = Number(answer.trim());

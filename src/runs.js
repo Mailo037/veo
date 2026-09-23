@@ -119,7 +119,7 @@ export async function registerRun(cancel, root = cacheBase()) {
   const file = path.join(directory, `${randomUUID()}.json`);
   const request = `${file}.cancel`;
   const record = { version: 1, id, pid: process.pid, startedAt: new Date().toISOString(),
-    urls: [], output: null, media: null, quality: null, format: null, playlist: false, job: null };
+    urls: [], output: null, media: null, quality: null, format: null, profile: null, playlist: false, job: null };
   await writeJson(file, record);
   // A flush that started while this run registered must still win.
   if (await exists(gate)) {
@@ -148,6 +148,7 @@ export async function registerRun(cancel, root = cacheBase()) {
         media: details.audio ? 'audio' : 'video',
         quality: details.audio ? null : text(details.quality) || null,
         format: text(details.format) || null,
+        profile: text(details.profile) || null,
         playlist: Boolean(details.playlist),
         job: text(details.job) || null,
       });
@@ -233,6 +234,7 @@ export function formatRunDetails(run) {
   lines.push(`State:   ${run.alive ? `running (PID ${run.pid})` : `stale (PID ${run.pid} is gone)`}`);
   lines.push(`Started: ${localStamp(run.startedAt)}${run.alive && running ? ` (${running} ago)` : ''}`);
   lines.push(`Media:   ${describeMedia(run)}`);
+  lines.push(`Profile: ${text(run.profile) || 'global (no profile)'}`);
   lines.push(`Output:  ${text(run.output) || 'not resolved yet'}`);
   lines.push(`Job:     ${text(run.job) || 'not created yet'}`);
   const urls = (Array.isArray(run.urls) ? run.urls : []).map(text).filter(Boolean);
@@ -286,7 +288,8 @@ export async function runsMain(args = [], { stdout = process.stdout, root = cach
 function publicRun(run) {
   return { id: run.id, pid: run.pid, state: run.alive ? 'running' : 'stale', startedAt: run.startedAt || null,
     urls: Array.isArray(run.urls) ? run.urls : [], output: run.output || null, media: run.media || null,
-    quality: run.quality || null, format: run.format || null, playlist: Boolean(run.playlist), job: run.job || null,
+    quality: run.quality || null, format: run.format || null, profile: run.profile || null,
+    playlist: Boolean(run.playlist), job: run.job || null,
     progress: run.progress || null };
 }
 
