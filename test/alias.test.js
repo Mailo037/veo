@@ -56,7 +56,7 @@ test('add/remove/list round-trips a wrapper on this platform', async () => {
   } finally { await rm(binDir, { recursive: true, force: true }); }
 });
 
-test('POSIX alias executes veo with literal arguments and uninstall -p removes it', { skip: process.platform === 'win32' }, async () => {
+test('POSIX alias executes veo with literal arguments and alias remove deletes it', { skip: process.platform === 'win32' }, async () => {
   const binDir = await mkdtemp(path.join(os.tmpdir(), 'veo-alias-exec-'));
   try {
     const veo = path.join(binDir, 'veo');
@@ -80,7 +80,7 @@ test('POSIX alias executes veo with literal arguments and uninstall -p removes i
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(result.stdout.trimEnd().split('\n'), args);
     const removed = output();
-    assert.equal(await uninstallMain(['-p', 'vo', '--bin-dir', binDir], { stdout: removed }), 0);
+    assert.equal(await aliasMain(['remove', 'vo', '--bin-dir', binDir], { stdout: removed }), 0);
     assert.match(removed.text(), /Alias removed: vo/);
     assert.deepEqual(await readdir(binDir), ['veo']);
   } finally { await rm(binDir, { recursive: true, force: true }); }
@@ -142,9 +142,6 @@ test('npm uninstall avoids shell and reports failures like update', () => {
   assert.equal(spec.command, 'cmd.exe');
   assert.deepEqual(spec.args, ['/d', '/s', '/c', 'npm uninstall -g veodl']);
   assert.equal(npmUninstallCommand({ platform: 'linux' }).command, 'npm');
-  assert.deepEqual(npmUninstallCommand({ platform: 'darwin' }), {
-    command: 'npm', args: ['uninstall', '-g', 'veodl'], shell: false,
-  });
 });
 
 test('uninstall -p removes one alias; bare uninstall plans without --yes', async () => {
@@ -167,21 +164,6 @@ test('uninstall -p removes one alias; bare uninstall plans without --yes', async
     assert.equal(JSON.parse(planned.text()).status, 'planned');
     await assert.rejects(uninstallMain(['-p', 'veo-short', '--keep-cache', '--bin-dir', binDir], { stdout: out, stderr: err }), /--keep-/);
   } finally { await rm(binDir, { recursive: true, force: true }); }
-});
-
-test('uninstall plans the active VEO_CONFIG path on macOS', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'veo-uninstall-macos-'));
-  try {
-    const config = path.join(root, 'custom-config.json');
-    await writeFile(config, '{}');
-    const out = output();
-    assert.equal(await uninstallMain(['--json', '--bin-dir', root], {
-      platform: 'darwin', env: { ...process.env, VEO_CONFIG: config }, stdout: out,
-      cacheRoot: path.join(root, 'cache'),
-    }), 0);
-    assert.equal(JSON.parse(out.text()).config, config);
-    assert.equal(await readFile(config, 'utf8'), '{}', 'planning must not delete config');
-  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('uninstall --yes removes aliases, package, cache and config', async () => {

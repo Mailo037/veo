@@ -45,13 +45,13 @@ export const CONFIG_KEYS = Object.freeze({
   playlistItems: 'string',
 });
 
-export function configFile({ env = process.env, platform = process.platform } = {}) {
+export function configFile({ env = process.env } = {}) {
   const override = env.VEO_CONFIG;
   if (typeof override === 'string' && override.trim()) {
     if (override.includes('\0')) throw new Error('VEO_CONFIG must be a filesystem path.');
     return path.resolve(override.trim());
   }
-  return path.join(configBase({ env, platform }), 'config.json');
+  return path.join(configBase({ env }), 'config.json');
 }
 
 function typeOf(value) {

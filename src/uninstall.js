@@ -2,8 +2,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { commandOutput } from './output.js';
-import { cacheBase } from './paths.js';
-import { configFile as resolveConfigFile } from './config.js';
+import { cacheBase, configBase } from './paths.js';
 import { cleanText, readableError } from './utils.js';
 import { removeAlias, validateAliasName, listAliases } from './alias.js';
 
@@ -121,7 +120,7 @@ export async function uninstallMain(args = [], {
   }
 
   const cache = cacheRoot || cacheBase({ platform, env });
-  const config = configFile || resolveConfigFile({ platform, env });
+  const config = configFile || path.join(configBase({ platform, env }), 'config.json');
   const manual = `npm uninstall -g ${PACKAGE}`;
 
   // Custom wrappers first so the plan names them; npm removes veo/veodl itself.

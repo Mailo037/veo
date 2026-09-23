@@ -529,7 +529,6 @@ and config paths); `veo uninstall --yes` deletes all of it — custom wrappers,
 the package with `npm uninstall -g veodl`, veo's cache directory (downloads,
 jobs, backend tools, history, statistics) and the config file. Use
 `--keep-aliases`, `--keep-cache` or `--keep-config` to preserve one part.
-The plan shows the active config path, including a `VEO_CONFIG` override.
 Add `--json` for scripting.
 
 ### `veo flush`

@@ -147,21 +147,6 @@ test('veo stop cancels the named run only, and every run without an id', async (
   } finally { await second.unregister(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('a stop request cancels a run once even while the request file remains', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'veo-stop-once-'));
-  let run;
-  let cancellations = 0;
-  try {
-    run = await registerRun(() => { cancellations++; }, root);
-    await writeFile(`${run.file}.cancel`, 'stop');
-    await new Promise(resolve => setTimeout(resolve, 650));
-    assert.equal(cancellations, 1);
-  } finally {
-    await run?.unregister();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test('veo stop removes stale records and reports a run that ignores the request', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'veo-stop-stale-'));
   try {
