@@ -6,8 +6,8 @@ All notable changes to veo. This project follows [Semantic Versioning](https://s
 
 ### Changed
 
-- Renamed package to `veod` on npm.
-- Added `veod` as a parallel terminal command alongside `veo` (both execute the same CLI).
+- Renamed package to `veodl` on npm.
+- Provided `veo`, `veod`, and `veodl` as parallel terminal commands (all execute the same CLI).
 
 ## 1.8.0
 

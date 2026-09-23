@@ -9,7 +9,7 @@ import { readableError } from './utils.js';
 
 export { compareVersions };
 
-const PACKAGE = 'veod';
+const PACKAGE = 'veodl';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const UPDATE_HELP = `veo update - keep veo current

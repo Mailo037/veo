@@ -1,11 +1,12 @@
 {
-  "name": "veod",
+  "name": "veodl",
   "version": "1.8.1",
   "description": "A clean, simple video downloader powered by yt-dlp.",
   "type": "module",
   "bin": {
     "veo": "bin/veo.js",
-    "veod": "bin/veo.js"
+    "veod": "bin/veo.js",
+    "veodl": "bin/veo.js"
   },
   "files": [
     "bin/",

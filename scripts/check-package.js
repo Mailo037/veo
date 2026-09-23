@@ -5,7 +5,7 @@ import { gunzipSync } from 'node:zlib';
 import { globSync } from 'node:fs';
 import path from 'node:path';
 import { compareVersions } from '../src/version.js';
-const archives = globSync('{veod,mailo037-veo}-*.tgz')
+const archives = globSync('{veodl,veod,mailo037-veo}-*.tgz')
   .sort((a, b) => compareVersions(b.match(/([\d.]+)\.tgz$/)[1], a.match(/([\d.]+)\.tgz$/)[1]));
 const archive = process.argv[2] || archives[0];
 if (!archive) {
@@ -57,6 +57,6 @@ for (const name of names) {
 // half-finished release bump cannot be published.
 const pkg = JSON.parse(contents.get('package/package.json').toString());
 assert.match(pkg.version, /^\d+\.\d+\.\d+$/, `Invalid package version: ${pkg.version}`);
-assert.match(archive, new RegExp(`(?:veod|veo)-${pkg.version.replace(/\./g, '\\.')}\\.tgz$`), `Tarball name does not match version ${pkg.version}`);
+assert.match(archive, new RegExp(`(?:veodl|veod|veo)-${pkg.version.replace(/\./g, '\\.')}\\.tgz$`), `Tarball name does not match version ${pkg.version}`);
 assert(contents.get('package/CHANGELOG.md').toString().includes(`## ${pkg.version}`), `CHANGELOG.md has no "## ${pkg.version}" section`);
 console.log(`PASS: ${archive}: ${names.length} entries, shebang present, bin mode ${binMode.toString(8)} (npm sets 0755 on install), required runtime files, imports resolve, version ${pkg.version} consistent, no development files.`);
