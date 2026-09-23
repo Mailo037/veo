@@ -112,7 +112,7 @@ test('update runs npm install and prunes old backend caches', async () => {
     });
     assert.equal(code, 0);
     assert.equal(spawned.command, 'npm');
-    assert.deepEqual(spawned.args, ['install', '-g', '--no-fund', '--no-audit', '@mailo037/veo@latest']);
+    assert.deepEqual(spawned.args, ['install', '-g', '--no-fund', '--no-audit', 'veod@latest']);
     assert.deepEqual((await readdir(backends)).sort(), ['2026.08.19-win32-x64']);
     assert.match(out.text(), /veo updated to 1\.0\.2/);
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -122,7 +122,7 @@ test('npm spawn avoids shell:true on every platform and reports ENOENT cleanly',
   const spec = npmSpawnCommand({ platform: 'win32' });
   assert.equal(spec.shell, false);
   assert.equal(spec.command, 'cmd.exe');
-  assert.deepEqual(spec.args, ['/d', '/s', '/c', 'npm install -g --no-fund --no-audit @mailo037/veo@latest']);
+  assert.deepEqual(spec.args, ['/d', '/s', '/c', 'npm install -g --no-fund --no-audit veod@latest']);
   assert.equal(spec.windowsVerbatimArguments, true);
   assert.equal(npmSpawnCommand({ platform: 'linux' }).shell, false);
   const out = jsonOutput();
@@ -154,7 +154,7 @@ test('Windows update launches npm.cmd with literal arguments and preserves its e
       return child;
     } });
     assert.equal(code, 7);
-    assert.equal(output.trim(), 'install -g --no-fund --no-audit @mailo037/veo@latest');
+    assert.equal(output.trim(), 'install -g --no-fund --no-audit veod@latest');
     assert.ok(!warnings.includes('DEP0190'));
   } finally {
     process.off('warning', onWarning);

@@ -1,10 +1,11 @@
 {
-  "name": "@mailo037/veo",
-  "version": "1.8.0",
+  "name": "veod",
+  "version": "1.8.1",
   "description": "A clean, simple video downloader powered by yt-dlp.",
   "type": "module",
   "bin": {
-    "veo": "bin/veo.js"
+    "veo": "bin/veo.js",
+    "veod": "bin/veo.js"
   },
   "files": [
     "bin/",

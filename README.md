@@ -10,17 +10,18 @@ Automating with an agent? Start with the [agent guide](docs/AGENT_GUIDE.md) for 
 
 Requires **Node.js 22+** and npm. Internet access is needed for installation and first-use backend setup.
 
-The npm package is `@mailo037/veo`; the installed command is `veo`.
+The npm package is `veod`; the installed commands are `veo` and `veod`.
 
 ```bash
-npx @mailo037/veo "https://example.com/video.mp4"
+npx veod "https://example.com/video.mp4"
 ```
 
 Or install globally:
 
 ```bash
-npm install -g @mailo037/veo
+npm install -g veod
 veo "https://example.com/video.mp4"
+# or: veod "https://example.com/video.mp4"
 ```
 
 The first download automatically prepares missing yt-dlp, FFmpeg and FFprobe.
@@ -102,7 +103,7 @@ veo "https://example.com/video.mp4" --audio -r "My Music"
 veo <url1> <url2> <url3> --embed-metadata --subs
 veo "https://youtube.com/playlist?list=LIST_ID" --playlist -q 720p
 veo "https://example.com/video.mp4" --resume
-npx @mailo037/veo "https://example.com/video.mp4" --output ./downloads
+npx veod "https://example.com/video.mp4" --output ./downloads
 ```
 
 ### Several URLs and playlists
@@ -488,7 +489,7 @@ veo backend update    # install the newest yt-dlp release
 veo backend reset     # back to the release pinned in this veo version
 ```
 
-`veo update` runs `npm install -g @mailo037/veo@latest` and then removes yt-dlp backend
+`veo update` runs `npm install -g veod@latest` and then removes yt-dlp backend
 caches from older pinned releases, keeping an explicitly installed backend release. It
 never uses a shell on Linux/macOS, passes fixed arguments only, and prints the manual npm
 command on any failure. The registry can be overridden with `VEO_REGISTRY` (or npm's
@@ -603,7 +604,7 @@ media tools for Windows 11's x64 emulation.
 With Node.js 22+ and npm already installed in Termux:
 
 ```sh
-npm install -g @mailo037/veo
+npm install -g veod
 veo "URL"
 ```
 

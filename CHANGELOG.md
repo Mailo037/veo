@@ -2,6 +2,13 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.8.1
+
+### Changed
+
+- Renamed package to `veod` on npm.
+- Added `veod` as a parallel terminal command alongside `veo` (both execute the same CLI).
+
 ## 1.8.0
 
 ### Added
