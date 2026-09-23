@@ -10,7 +10,7 @@ import {
   compareVersions, defaultRegistry, fetchLatestVersion, maybeUpdateNotice,
   updateMain, pruneBackendCaches, npmSpawnCommand, runNpmUpdate, UPDATE_HELP,
 } from '../src/updater.js';
-import { main } from '../src/cli.js';
+import { main, shouldUpdateNotice } from '../src/cli.js';
 
 function jsonOutput() {
   const chunks = [];
@@ -52,6 +52,7 @@ test('post-download notice is throttled, silent on failure, and skippable', asyn
     const fetchImpl = async () => ({ ok: true, json: async () => ({ version: '2.0.0' }) });
     const first = await maybeUpdateNotice({ currentVersion: '1.0.1', stateFile, fetchImpl });
     assert.match(first, /Update available: veo 2\.0\.0/);
+    assert.match(first, /Run: veo up/);
     assert.equal(await maybeUpdateNotice({ currentVersion: '1.0.1', stateFile, fetchImpl }), null, 'second check within TTL must be throttled');
     const state = JSON.parse(await readFile(stateFile, 'utf8'));
     assert.equal(state.latest, '2.0.0');
@@ -78,6 +79,8 @@ test('update command checks, refuses unknown options, and prints help', async ()
   assert.match(out.text(), /is up to date/);
   assert.equal(await updateMain(['upgrade', '--check'], { current: '1.0.0', fetchImpl: fetchOf('1.0.2'), stdout: out, stderr: err }), 0);
   assert.match(out.text(), /Update available: veo 1\.0\.2/);
+  assert.equal(await updateMain(['up', '--check'], { current: '1.0.0', fetchImpl: fetchOf('1.0.3'), stdout: out, stderr: err }), 0);
+  assert.match(out.text(), /Update available: veo 1\.0\.3/);
   await assert.rejects(() => updateMain(['update', '--fancy'], { current: '1.0.0', fetchImpl: fetchOf('1.0.1'), stdout: out, stderr: err }), /Unknown option/);
   assert.equal(await updateMain(['update', '--help'], { current: '1.0.0', fetchImpl: fetchOf('1.0.1'), stdout: out, stderr: err }), 0);
   assert.match(out.text(), /veo update - keep veo current/);
@@ -172,6 +175,7 @@ test('CLI routes update subcommands without URL validation', async () => {
   process.env.VEO_REGISTRY = `http://127.0.0.1:${server.address().port}`;
   try {
     assert.equal(await main(['upgrade', '--check']), 0);
+    assert.equal(await main(['up', '--check']), 0);
     assert.equal(await main(['check', 'update']), 0);
     assert.equal(await main(['check']), 0); // Bare `veo check` prints usage.
   } finally {
@@ -179,6 +183,21 @@ test('CLI routes update subcommands without URL validation', async () => {
     else process.env.VEO_REGISTRY = previous;
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+test('update hint is skipped for help, version and the update commands', () => {
+  assert.equal(shouldUpdateNotice([]), true);
+  assert.equal(shouldUpdateNotice(['stats']), true);
+  assert.equal(shouldUpdateNotice(['doctor']), true);
+  assert.equal(shouldUpdateNotice(['alias', 'list']), true);
+  assert.equal(shouldUpdateNotice(['https://example.com/video.mp4']), true);
+  for (const args of [
+    ['--help'], ['-h'], ['--version'], ['-v'],
+    ['help'], ['version'],
+    ['update'], ['update', '--check'],
+    ['up'], ['up', '--check'],
+    ['upgrade'], ['check', 'update'], ['check'],
+  ]) assert.equal(shouldUpdateNotice(args), false, `should skip ${args.join(' ')}`);
 });
 
 test('prune keeps current cache and ignores missing roots', async () => {

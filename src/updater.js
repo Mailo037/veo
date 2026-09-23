@@ -17,6 +17,7 @@ export const UPDATE_HELP = `veo update - keep veo current
 Usage:
   veo update               Install the latest version with npm
   veo update --check       Only check whether a newer version exists
+  veo up                   Short alias for veo update (also: veo up --check)
   veo upgrade              Alias for veo update
   veo check update         Alias for veo update --check
 
@@ -95,7 +96,7 @@ export async function maybeUpdateNotice({
   try {
     latest = await fetchLatestVersion({ fetchImpl, registry, timeoutMs });
     if (compareVersions(latest, currentVersion) > 0) {
-      message = `Update available: veo ${latest} (you have ${currentVersion}). Run: veo update`;
+      message = `Update available: veo ${latest} (you have ${currentVersion}). Run: veo up`;
     }
   } catch {
     latest = null; // Unreachable registry still consumes the throttle interval.
@@ -158,7 +159,7 @@ export async function packageVersion() {
 }
 
 /**
- * Implements `veo update [--check]`, `veo upgrade`, and `veo check update`.
+ * Implements `veo update [--check]`, `veo up`, `veo upgrade`, and `veo check update`.
  * Returns the process exit code. Deps are injectable for tests.
  */
 export async function updateMain(args, {
@@ -174,6 +175,7 @@ export async function updateMain(args, {
   activeBackend,
 } = {}) {
   [args, stdout, stderr] = commandOutput(args, stdout, stderr);
+  if (args[0] === 'up') args = ['update', ...args.slice(1)];
   current = current ?? await packageVersion();
   const isCheckCommand = args[0] === 'check';
   const rest = isCheckCommand ? args.slice(2) : args.slice(1);
@@ -194,7 +196,7 @@ export async function updateMain(args, {
   }
   const newer = compareVersions(latest, current) > 0;
   if (checkOnly) {
-    stdout.write(newer ? `Update available: veo ${latest} (you have ${current}). Run: veo update\n` : `${currentText} is up to date.\n`);
+    stdout.write(newer ? `Update available: veo ${latest} (you have ${current}). Run: veo up\n` : `${currentText} is up to date.\n`);
     return 0;
   }
   if (newer) {

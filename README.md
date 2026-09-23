@@ -10,7 +10,7 @@ Automating with an agent? Start with the [agent guide](docs/AGENT_GUIDE.md) for 
 
 Requires **Node.js 22+** and npm. Internet access is needed for installation and first-use backend setup.
 
-The npm package is `veodl`; the installed commands are `veo`, `veod`, and `veodl`.
+The npm package is `veodl`; the installed commands are `veo` and `veodl`.
 
 ```bash
 npx veodl "https://example.com/video.mp4"
@@ -21,7 +21,7 @@ Or install globally:
 ```bash
 npm install -g veodl
 veo "https://example.com/video.mp4"
-# or: veod / veodl "https://example.com/video.mp4"
+# or: veodl "https://example.com/video.mp4"
 ```
 
 The first download automatically prepares missing yt-dlp, FFmpeg and FFprobe.
@@ -452,9 +452,11 @@ paths and custom comments are preserved.
   xdg-utils and a file association). The CLI does not wait for the player to close. If the
   opener cannot be launched, a warning is printed and the successful download still exits
   with `0`; later errors inside the detached opener/player are not monitored.
-- After each successful download, veo checks the npm registry at most once per day for a
-  newer version and prints a one-line notice on stderr (never on failure). Disable it with
-  `VEO_NO_UPDATE_CHECK=1`; `VEO_REGISTRY`/`npm_config_registry` are respected.
+- After each successful command, veo checks the npm registry at most once per day for a
+  newer version and prints a one-line notice on stderr (`Update available: veo X
+  (you have Y). Run: veo up`). Help, version and the update commands themselves
+  stay quiet. Disable it with `VEO_NO_UPDATE_CHECK=1`;
+  `VEO_REGISTRY`/`npm_config_registry` are respected.
 - Exit status is `0` on success, `1` on errors, and `130` on cancellation. With several
   URLs, `1` means at least one URL failed.
 
@@ -483,10 +485,17 @@ veo flush             # stop runs, clear temporary downloads and retry jobs
 veo flush --stats     # the same, and reset the statistics
 veo update            # install the latest veo with npm
 veo update --check    # only check for a newer veo
+veo up                # short alias for veo update (also: veo up --check)
 veo upgrade           # alias for veo update
 veo check update      # alias for veo update --check
 veo backend update    # install the newest yt-dlp release
 veo backend reset     # back to the release pinned in this veo version
+veo alias list        # shipped (veo, veodl) plus custom wrappers
+veo alias add veo-dl  # create veo-dl as a wrapper that calls veo
+veo alias remove veo-dl  # delete a custom wrapper
+veo uninstall -p veodl   # delete one alias (veo itself stays installed)
+veo uninstall            # plan the full removal (aliases, package, cache, config)
+veo uninstall --yes      # remove everything
 ```
 
 `veo update` runs `npm install -g veodl@latest` and then removes yt-dlp backend
@@ -494,6 +503,33 @@ caches from older pinned releases, keeping an explicitly installed backend relea
 never uses a shell on Linux/macOS, passes fixed arguments only, and prints the manual npm
 command on any failure. The registry can be overridden with `VEO_REGISTRY` (or npm's
 `npm_config_registry`) for mirrors and proxies.
+
+### `veo alias` and `veo uninstall`
+
+The npm package is `veodl`; a global install ships the commands `veo`
+and `veodl`. `veo alias` manages extra command names without reinstalling:
+
+```bash
+veo alias list
+veo alias add veo-dl
+veo alias remove veo-dl
+veo uninstall -p veodl
+```
+
+`add` creates a small wrapper next to the `veo` command found on `PATH` that
+forwards to `veo`, so it survives `veo update`. Names use 2-31 lowercase
+letters, digits or hyphens. `remove` (also `veo alias rm`) deletes the wrapper
+files; `veo` itself can never be removed this way. Removing a shipped name such
+as `veodl` only deletes that shortcut — the next `veo update` recreates it.
+
+`veo uninstall -p <name>` is a shortcut for `veo alias remove <name>`. Bare
+`veo uninstall` removes everything: without flags it only prints the plan
+(package `veodl` with commands veo, veodl, plus custom wrappers, cache
+and config paths); `veo uninstall --yes` deletes all of it — custom wrappers,
+the package with `npm uninstall -g veodl`, veo's cache directory (downloads,
+jobs, backend tools, history, statistics) and the config file. Use
+`--keep-aliases`, `--keep-cache` or `--keep-config` to preserve one part.
+Add `--json` for scripting.
 
 ### `veo flush`
 

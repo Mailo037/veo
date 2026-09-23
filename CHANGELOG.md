@@ -2,6 +2,18 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.8.3
+
+### Added
+
+- Added `veo alias` commands (`list`, `add`, `remove`) to manage custom command names and shortcuts that forward to `veo`.
+- Added `veo uninstall` to remove individual aliases with `-p <name>`, or perform a full interactive/planned purge with `--yes`.
+- Added `veo up` as a short alias for `veo update`.
+
+### Changed
+
+- Streamlined package binary commands to `veo` and `veodl`.
+
 ## 1.8.2
 
 ### Changed

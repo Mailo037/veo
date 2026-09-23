@@ -249,7 +249,7 @@ export async function collectChecks({
     }
     if (latest) {
       const newer = compareVersions(latest, version) > 0;
-      push(newer ? 'warn' : 'ok', 'veo version', newer ? `${version} — ${latest} is available (run: veo update)` : `${version} is the latest release`);
+      push(newer ? 'warn' : 'ok', 'veo version', newer ? `${version} — ${latest} is available (run: veo up)` : `${version} is the latest release`);
     }
   }
   return checks;

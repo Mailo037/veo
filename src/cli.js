@@ -66,7 +66,7 @@ Options:
   -h, --help               Show help (also: veo help)
 
 Commands:
-  veo update [--check]     Update veo itself with npm
+  veo update|up [--check]   Update veo itself with npm (up is a short alias)
   veo backend update       Install a newer yt-dlp release (see veo backend --help)
   veo doctor               Diagnose the local setup
   veo flush                Stop veo runs and clear temporary downloads and jobs
@@ -78,6 +78,8 @@ Commands:
   veo inspect <file>        Read media metadata; --check-audio measures audio signal
   veo inspect run <id>     Inspect saved files from a finished run by its id
   veo stop [id]            Stop one run, or every active run
+  veo alias list|add|remove  Manage extra command names (wrappers calling veo)
+  veo uninstall [-p <name>]  Remove one alias, or everything with --yes
   veo version              Show the installed version
   veo config edit|path|profiles|check|show|reset  Manage defaults and named profiles
   veo config edit [--external|--terminal]      Choose the configuration editor
@@ -291,8 +293,28 @@ export async function main(args = process.argv.slice(2), { config } = {}) {
     }
     // The command's own validation reports configuration errors.
   }
-  if (['stats', 'history', 'flush', 'runs', 'inspect', 'stop', 'update', 'upgrade', 'check', 'doctor', 'backend'].includes(args[0])) args = display.remaining;
-  return withOutputSettings(color, () => runMain(args, { config }));
+  if (['stats', 'history', 'flush', 'runs', 'inspect', 'stop', 'update', 'up', 'upgrade', 'check', 'doctor', 'backend', 'alias', 'uninstall'].includes(args[0])) args = display.remaining;
+  const code = await withOutputSettings(color, () => runMain(args, { config }));
+  // One throttled (once per day) update hint after every successful command.
+  // Failures, cancellations, help/version output and the update commands
+  // themselves never trigger it; VEO_NO_UPDATE_CHECK=1 disables it for scripts.
+  if (code === 0 && shouldUpdateNotice(args)) {
+    try {
+      const notice = await maybeUpdateNotice({ currentVersion: await packageVersion() });
+      if (notice) process.stderr.write(`${notice}\n`);
+    } catch {
+      // Informational only: a broken notice must never fail the command.
+    }
+  }
+  return code;
+}
+
+// Help, version and the update commands report versions themselves;
+// anything else earns the daily update hint on success.
+export function shouldUpdateNotice(args = []) {
+  if (args.includes('-h') || args.includes('--help') || args.includes('-v') || args.includes('--version')) return false;
+  if (['update', 'up', 'upgrade', 'check', 'version', 'help'].includes(args[0])) return false;
+  return true;
 }
 
 async function runMain(args, { config }) {
@@ -334,8 +356,9 @@ async function runMain(args, { config }) {
   }
   const { cleanupDownloadCache } = await import('./download-cache.js');
   await cleanupDownloadCache().catch(error => stderr.write(`veo: Could not clean expired local downloads: ${readableError(error)}\n`));
-  // update/upgrade/check subcommands are handled before URL validation.
-  if (['update', 'upgrade', 'check'].includes(args[0])) {
+  // update/upgrade/up/check subcommands are handled before URL validation.
+  if (['update', 'up', 'upgrade', 'check'].includes(args[0])) {
+    if (args[0] === 'up') args = ['update', ...args.slice(1)];
     if (args[0] === 'check' && args[1] !== 'update') {
       stdout.write(UPDATE_HELP);
       return 0;
@@ -359,6 +382,24 @@ async function runMain(args, { config }) {
     try {
       const { backendUpdateMain } = await import('./backend-update.js');
       return await backendUpdateMain(args.slice(1));
+    } catch (error) {
+      stderr.write(`veo: ${readableError(error)}\n`);
+      return 1;
+    }
+  }
+  if (args[0] === 'alias') {
+    try {
+      const { aliasMain } = await import('./alias.js');
+      return await aliasMain(args.slice(1));
+    } catch (error) {
+      stderr.write(`veo: ${readableError(error)}\n`);
+      return 1;
+    }
+  }
+  if (args[0] === 'uninstall') {
+    try {
+      const { uninstallMain } = await import('./uninstall.js');
+      return await uninstallMain(args.slice(1));
     } catch (error) {
       stderr.write(`veo: ${readableError(error)}\n`);
       return 1;
@@ -438,10 +479,7 @@ async function runMain(args, { config }) {
     const { createStatsRecorder } = await import('./stats.js');
     const { createHistoryRecorder } = await import('./history.js');
     const result = await runJob(options, { download, reporter, signal: controller.signal, openFile, items: retryItems, jobFile: jobFile || undefined, runId: run?.id, recordStats: createStatsRecorder(), recordHistory: createHistoryRecorder() });
-    if (result !== 0) return result;
-    const notice = await maybeUpdateNotice({ currentVersion: await packageVersion() });
-    if (notice) stderr.write(`${notice}\n`);
-    return 0;
+    return result;
   } catch (error) {
     reporter.fail(controller.signal.aborted);
     stderr.write(`veo: ${readableError(error)}\n`);

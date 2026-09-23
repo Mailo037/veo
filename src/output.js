@@ -27,7 +27,7 @@ export function formatOutput(text, stream, enabled = settings.getStore()?.enable
     if (!line.trim() || /\x1b/.test(line)) return line;
     const value = line.trim();
     let role = 'muted';
-    if (/^(?:veo (?:stats|history|runs|stop|doctor|flush|update|backend)\b|veo \d[^ ]* doctor|ID\s+PID\s+STATE|Usage:|Options:|Commands:|Examples:|\d+\. )/.test(value)) role = 'title';
+    if (/^(?:veo (?:stats|history|runs|stop|doctor|flush|update|backend|alias|uninstall)\b|veo \d[^ ]* doctor|ID\s+PID\s+STATE|Usage:|Options:|Commands:|Examples:|\d+\. )/.test(value)) role = 'title';
     if (/^(?:\[?OK\]?\s|Saved:|Flushed:|Stopped\b|Removed\b|Config OK:|Statistics reset|Managed tools are ready)|\bis up to date\b|\bupdated to\b|\binstalled and will be used\b/i.test(value)) role = 'success';
     if (/^(?:\[?FAIL\]?\s|Error:|veo: (?!note:))|Status:\s*(?:failed|cancelled)/i.test(value)) role = 'error';
     if (/Status:\s*saved/.test(value)) role = 'success';
