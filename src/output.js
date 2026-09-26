@@ -47,6 +47,8 @@ export function outputStream(stream, { enabled = settings.getStore()?.enabled !=
   return {
     isTTY: stream.isTTY,
     get columns() { return stream.columns; },
+    on(event, listener) { stream.on?.(event, listener); },
+    removeListener(event, listener) { stream.removeListener?.(event, listener); },
     write(chunk, ...args) {
       if (typeof chunk !== 'string') return stream.write(chunk, ...args);
       return stream.write(formatOutput(chunk, stream, enabled), ...args);

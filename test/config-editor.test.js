@@ -1,12 +1,42 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EditorBuffer, colorLine, editConfig, validateEditorText } from '../src/config-editor.js';
 import { editorCompletions } from '../src/config-diagnostics.js';
 import { CONFIG_GUIDE } from '../src/config-template.js';
+
+test('closing the editor lets the process exit while its stdin remains open', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'veo-editor-exit-'));
+  const file = path.join(dir, 'config.json');
+  let child, timeout;
+  try {
+    await writeFile(file, '{}\n');
+    const source = `import { editConfig } from './src/config-editor.js';
+      process.stdin.isTTY = process.stdout.isTTY = true;
+      process.stdin.setRawMode = value => { process.stdin.isRaw = value; };
+      await editConfig(process.argv[1]);`;
+    child = spawn(process.execPath, ['--input-type=module', '-e', source, file], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let opened = false, errors = '';
+    child.stderr.on('data', chunk => { errors += chunk; });
+    child.stdout.on('data', chunk => {
+      if (!opened && chunk.toString().includes('Ctrl+S')) { opened = true; child.stdin.write('\x1b'); }
+    });
+    timeout = setTimeout(() => child.kill(), 5000);
+    const [code, signal] = await once(child, 'exit');
+    assert.ok(opened, errors);
+    assert.equal(signal, null, 'editor process should exit without being killed');
+    assert.equal(code, 0, errors);
+  } finally {
+    clearTimeout(timeout);
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('semantic errors locate properties and values without matching comments or other profiles', async () => {
   for (const [text, span, message, line] of [
@@ -104,7 +134,7 @@ test('terminal session saves, blocks invalid writes, confirms discard and restor
     await waitFor(() => screen.includes('Ctrl+S'));
     const firstFrame = screen.slice(screen.lastIndexOf('\x1b[H') + 3).split('\r\n');
     assert.equal(firstFrame.length, output.rows, 'the editor fills the terminal without empty status rows');
-    assert.match(firstFrame.at(-2), /Ln 1, Col 1/);
+    assert.match(firstFrame.at(-1), /Ln 1, Col 1/);
     assert.match(firstFrame.at(-1), /Config OK/);
     key('right'); key(undefined, '"audio":true'); key('s', '', true);
     await waitFor(() => screen.includes('Saved'));
@@ -261,6 +291,7 @@ test('Ctrl+Z and Ctrl+Y undo and redo grouped typing, replacement and paste', as
     assert.equal(await readFile(file, 'utf8'), pasteText);
     input.write('\x1b'); await session;
     assert.equal(input.isRaw, false);
+    assert.equal(input.isPaused(), true, 'editor releases input that was not flowing before it opened');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -283,11 +314,11 @@ test('dragging at viewport edges scrolls and extends selection until release', a
     const session = editConfig(file, { input, output, clipboard: { copy: async value => { copied = value; }, paste: async () => '' } });
     await waitFor(() => /Ctrl\+Z.*Undo/.test(screen));
     screen = '';
-    input.write('\x1b[<0;5;3M\x1b[<32;5;9M');
-    await waitFor(() => /line 10/.test(screen));
-    input.write('\x1b[<0;5;9m\x03');
-    await waitFor(() => copied.includes('line 9'));
-    assert.match(copied, /line 1[\s\S]*line 9/);
+    input.write('\x1b[<0;5;3M\x1b[<32;5;10M');
+    await waitFor(() => /line 11/.test(screen));
+    input.write('\x1b[<0;5;10m\x03');
+    await waitFor(() => copied.includes('line 10'));
+    assert.match(copied, /line 1[\s\S]*line 10/);
     screen = '';
     await new Promise(resolve => setTimeout(resolve, 220));
     assert.equal(screen, '', 'released drag does not keep scrolling');

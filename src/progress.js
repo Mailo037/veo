@@ -32,6 +32,27 @@ function fit(text, width) {
   return width > 0 ? result + '…' : '';
 }
 
+export function terminalText(stream, text) {
+  return fit(cleanText(text), stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity);
+}
+
+export function terminalTitle(stream, text) {
+  const safe = cleanText(text);
+  if (!stream.isTTY) return safe;
+  const width = Math.max(1, (stream.columns || 80) - 1);
+  const lines = [];
+  let line = '';
+  for (const char of safe) {
+    if (cells(line + char) > width) {
+      if (lines.length === 2) return [...lines, fit(line + char + '…', width)].join('\n');
+      lines.push(line);
+      line = '';
+    }
+    line += char;
+  }
+  return [...lines, line].join('\n');
+}
+
 export function formatProgress(data, { columns = Infinity, prefix = '' } = {}) {
   const done = Number.isFinite(data.downloaded_bytes) ? data.downloaded_bytes : 0;
   const total = data.total_bytes || data.total_bytes_estimate;
@@ -42,7 +63,7 @@ export function formatProgress(data, { columns = Infinity, prefix = '' } = {}) {
   const pct = `${estimated && data.status !== 'finished' ? '~' : ''}${percent === null ? '?' : percent.toFixed(0)}%`;
   const size = `${estimated ? '~' : ''}${bytes(total)}`;
   const compact = value => bytes(value).replace(' ', '');
-  const label = prefix ? fit(cleanText(prefix), Math.max(0, Math.floor(columns / 3))) + ' ' : '';
+  const label = prefix ? cleanText(prefix) + ' ' : '';
   const variants = data.status === 'finished'
     ? [`${bytes(done)} received; processing…`, `${compact(done)} received`, 'Received']
     : [
@@ -53,6 +74,11 @@ export function formatProgress(data, { columns = Infinity, prefix = '' } = {}) {
       pct,
     ];
   for (const variant of variants) if (cells(label + variant) <= columns) return label + variant;
+  if (prefix) {
+    const variant = variants[Math.min(2, variants.length - 1)];
+    const available = columns - cells(variant) - 1;
+    if (available > 0) return fit(cleanText(prefix), available) + ' ' + variant;
+  }
   return fit(variants.at(-1), columns);
 }
 
@@ -72,8 +98,18 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
   let animationLabel = '';
   let animationOwner;
   let animationFrame = 0;
+  let redraw;
+  let listening = false;
+  const onResize = () => { if (active) redraw?.(); };
+  const watchResize = render => {
+    redraw = render;
+    if (!listening && stream.isTTY && stream.on) {
+      stream.on('resize', onResize);
+      listening = true;
+    }
+  };
   const stopAnimation = () => { if (animation) clearInterval(animation); animation = undefined; };
-  const display = value => fit(value, stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity);
+  const display = value => terminalText(stream, value);
   const animate = (label, owner) => {
     clear();
     if (!stream.isTTY) { stream.write(muted(label + '…') + '\n'); return; }
@@ -81,6 +117,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     animationOwner = owner;
     animationFrame = 0;
     const tick = () => { stream.write(`\r\x1b[2K${muted(display(animationLabel + '.'.repeat(animationFrame % 3 + 1)))}`); active = true; animationFrame++; };
+    watchResize(tick);
     tick();
     animation = setInterval(tick, 350);
     animation.unref?.();
@@ -101,10 +138,17 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     stream.write(muted(display(label)) + '\n');
   };
   const line = (data, prefix) => formatProgress(data, { prefix, columns: stream.isTTY ? Math.max(1, (stream.columns || 80) - 1) : Infinity });
-  const draw = (data, prefix) => { stream.write(`\r\x1b[2K${line(data, prefix)}`); active = true; };
+  const draw = (data, prefix) => {
+    const render = () => { stream.write(`\r\x1b[2K${line(data, prefix)}`); active = true; };
+    watchResize(render);
+    render();
+  };
   const updateTitle = () => setTitle(`veo | ${phase}${name ? ` | ${name}` : ''}`);
   function clear() {
     stopAnimation();
+    if (listening) stream.removeListener?.('resize', onResize);
+    listening = false;
+    redraw = undefined;
     if (active && stream.isTTY) stream.write('\r\x1b[2K');
     active = false;
     animationLabel = '';
@@ -118,7 +162,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
       phase = cleanText(message); name = childName;
       const line = prefix + childName + ': ' + phase;
       if (phase.endsWith('…')) animate(line.slice(0, -1), owner);
-      else { clear(); stream.write((quiet ? muted(line) : line) + '\n'); }
+      else { clear(); stream.write((quiet ? muted(display(line)) : display(line)) + '\n'); }
       if (started) updateTitle();
     };
     return {
@@ -150,7 +194,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     scoped,
     item(index, total, title) {
       clear(); position = total > 1 ? `[${index}/${total}] ` : ''; hasItem = true; name = cleanText(title); streamName = ''; lastLog = 0;
-      stream.write(heading(`${position}${name}`) + '\n');
+      stream.write(heading(terminalTitle(stream, `${position}${name}`)) + '\n');
       phase = 'Starting…'; if (started) updateTitle();
     },
     processing(data) {
@@ -164,14 +208,14 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     start(title = '') { started = true; name = cleanText(title); phase = 'Starting…'; updateTitle(); },
     name(title) {
       const next = cleanText(title);
-      if (hasItem && next !== name) { clear(); stream.write(heading(`${position}${next}`) + '\n'); }
+      if (hasItem && next !== name) { clear(); stream.write(heading(terminalTitle(stream, `${position}${next}`)) + '\n'); }
       name = next; if (started) updateTitle();
     },
     status(message) {
       phase = cleanText(message);
       if (started) updateTitle();
       if (phase.endsWith('…')) animate(phase.slice(0, -1));
-      else { clear(); stream.write(muted(phase) + '\n'); }
+      else { clear(); stream.write(muted(display(phase)) + '\n'); }
     },
     profile(value) {
       const selected = value ? cleanText(value) : 'global (no profile)';
@@ -179,8 +223,8 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
       if (started) updateTitle();
       clear();
       stream.write(value && value !== 'default'
-        ? muted('Profile: ') + styleText(stream, selected, 'profile', color, env) + '\n'
-        : muted(phase) + '\n');
+        ? muted('Profile: ') + styleText(stream, fit(selected, stream.isTTY ? Math.max(0, (stream.columns || 80) - 10) : Infinity), 'profile', color, env) + '\n'
+        : muted(display(phase)) + '\n');
     },
     finishStatus(message, outcome) { finishStatus(message, undefined, '', outcome); },
     failStep() { if (animation && animationOwner === undefined) processingResult(animationLabel, 'failed'); },
@@ -189,7 +233,7 @@ export function createReporter(stream = process.stderr, { setTitle = createTermi
     progress(data) {
       if (data.stream && data.stream !== streamName) {
         clear(); streamName = data.stream; lastLog = 0;
-        stream.write(muted(`${position}${streamName} download`) + '\n');
+        stream.write(muted(display(`${position}${streamName} download`)) + '\n');
       }
       const total = data.total_bytes;
       const percent = Number.isFinite(total) && total > 0 && Number.isFinite(data.downloaded_bytes)

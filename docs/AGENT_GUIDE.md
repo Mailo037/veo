@@ -58,7 +58,7 @@ veo history --failed --limit 20 --json
 veo retry --last --json
 ```
 
-`runs` reports **active** runs, including their ID, state, options, job path and per-item progress. Completed runs disappear from this list. Download JSON and `history` retain the `runId`. `history` reports finished attempts with their outcome and saved file paths. A failed history entry may contain a `job` path, which can be passed to `veo --retry-failed "<job-path>"`; `veo retry --last` finds the newest retryable job automatically. Running jobs are excluded from `retry --last`.
+`runs` reports **active** runs, including their ID, state, options, job path and per-item progress. Completed runs disappear from this list. Download JSON and `history` retain the `runId`. `history` reports finished attempts with their outcome and saved file paths. Use `veo --retry-failed <runId>` to retry a failed or unfinished run; a saved `job` path is also accepted as `veo --retry-failed "<job-path>"`. The original retry job must still be present, and retrying an active run by ID is rejected. `veo retry --last` finds the newest retryable job automatically. Running jobs are excluded from `retry --last`.
 
 ## Inspect saved media and audio
 

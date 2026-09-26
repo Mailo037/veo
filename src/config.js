@@ -1,4 +1,5 @@
 import { commandOutput } from './output.js';
+import { folderLink } from './path-links.js';
 import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -262,7 +263,7 @@ export async function configMain(args) {
     editorMode = args[1]?.slice(2) || process.env.VEO_CONFIG_EDITOR || 'auto';
     if (!['auto', 'external', 'terminal'].includes(editorMode)) throw new Error('VEO_CONFIG_EDITOR must be auto, external or terminal.');
   } else if (args.length !== 1 || !['path', 'profiles', 'guide'].includes(args[0])) throw new Error('Usage: veo config edit|path|profiles|guide|check|show|reset');
-  if (args[0] === 'path') { stdout.write(`${file}\n`); return 0; }
+  if (args[0] === 'path') { stdout.write(`${folderLink(stdout, file)}\n`); return 0; }
   if (args[0] === 'guide') { stdout.write(CONFIG_GUIDE); return 0; }
   if (args[0] === 'profiles') {
     const loaded = await loadConfig();

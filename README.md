@@ -84,7 +84,7 @@ Options:
   --json                    One JSON object per URL instead of prose
   --profile <name>          Use a named profile from the config file
   --batch-file <file>       Read one URL per line (blank lines and # comments ignored)
-  --retry-failed <file>     Retry failed/unfinished downloads from a saved job
+  --retry-failed <id|file>  Retry failed/unfinished downloads by run ID or job file
   --playlist-items <list>   Select entries, e.g. 1,3-5 (implies --playlist)
   --skip-existing          Skip matching downloads that are still on disk
   --no-<boolean-option>    Disable a default, e.g. --no-open or --no-audio
@@ -125,7 +125,7 @@ Playlist downloads use two concurrent entries by default; use `--playlist-concur
 - `--batch-file links.txt` accepts a UTF-8 URL list, optionally alongside URLs on the command
   line. A final summary counts saved, skipped and failed videos. Successful files are opened
   with `--open` even if another URL or playlist entry fails.
-- Failed or cancelled jobs print a ready-to-use `veo --retry-failed "<job.json>"` command.
+- Failed or cancelled jobs print a ready-to-use `veo --retry-failed <runId>` command. Saved job file paths are also accepted.
 - Use `veo retry --last` to retry the newest failed or unfinished job without copying its path. Active runs are ignored; use `veo runs` to inspect them.
   Jobs are stored under the per-user veo cache's `jobs` directory. Retries retain resolved
   output directories and settings, even from a different working directory, and explicit
@@ -141,6 +141,7 @@ veo --batch-file links.txt --profile archive
 veo "https://example.com/playlist" --playlist-items 1,3-5 --resume
 veo "https://example.com/playlist" --playlist --skip-existing
 veo --retry-failed "C:\path\to\job.json"
+veo --retry-failed abc123
 veo retry --last
 ```
 
@@ -814,3 +815,6 @@ replacing the CLI.
 ## License
 
 MIT for this CLI. yt-dlp and FFmpeg/FFprobe retain their respective upstream licenses.
+# Clickable paths
+
+In supported terminals (Windows Terminal, iTerm2, WezTerm, Kitty, VS Code and recent VTE terminals), the `Saved:` path, `veo config path` and the config editor's header link to the containing folder. Use the terminal's link gesture, usually Ctrl+click or Cmd+click. The terminal and operating system decide whether file links open the file manager; unsupported terminals and redirected output show plain paths. Missing paths are not linked. JSON output remains plain.

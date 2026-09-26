@@ -2,6 +2,19 @@
 
 All notable changes to veo. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.10.1
+
+### Added
+
+- Added support for passing run IDs directly to `--retry-failed` (e.g. `veo --retry-failed <runId>`), resolving the corresponding retry job and rejecting active runs.
+- Added clickable OSC 8 directory links for saved file destinations, config paths, and editor headers in supported terminals (Windows Terminal, iTerm2, WezTerm, Kitty, VS Code, and VTE).
+
+### Fixed
+
+- Handled terminal window resize events during live progress display, dynamically refitting titles and status lines.
+- Improved terminal title and line wrapping to display up to three lines for long titles before truncating.
+- Improved interactive config editor footer layout for long status messages and ensured stdin is paused cleanly upon exit.
+
 ## 1.10.0
 
 ### Added

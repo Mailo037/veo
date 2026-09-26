@@ -1,13 +1,16 @@
 import { runPool, serialQueue, reducedLimit, formatTimings } from './execution.js';
-import { styleText } from './progress.js';
+import { styleText, terminalText } from './progress.js';
 import path from 'node:path';
 import { lstat, readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { cacheBase } from './paths.js';
 import { publicOptions, readJson, writeJson } from './state.js';
 import { cleanText, readableError, validateUrl } from './utils.js';
+import { RUN_ARCHIVE_ID } from './run-archive.js';
+import { folderLink } from './path-links.js';
 
-export async function retryOptions(file) {
+export async function retryOptions(file, root = cacheBase()) {
+  if (RUN_ARCHIVE_ID.test(file)) file = await retryJobForRun(file, root);
   const job = await readJson(path.resolve(file), null);
   if (job?.version !== 1 || !Array.isArray(job.items)) throw new Error('Invalid retry job file.');
   const pending = job.items.filter(item => !['saved', 'skipped'].includes(item.status));
@@ -20,6 +23,24 @@ export async function retryOptions(file) {
     return { ...job.options, ...item.options, url: item.url, resume: true,
       ...(item.status === 'failed' && failures.length && item.finished ? { playlistItems: failures.map(entry => entry.index).join(',') } : {}) };
   });
+}
+
+/** Resolve a persistent run ID using its original retry job, including older runs. */
+async function retryJobForRun(id, root) {
+  const { listRuns } = await import('./runs.js');
+  const runs = await listRuns(root);
+  if (runs.some(run => run.id === id && run.alive)) throw new Error(`Run ${id} is still active. Stop it before retrying.`);
+  const directory = path.join(path.resolve(root), 'jobs');
+  const entries = await readdir(directory, { withFileTypes: true }).catch(error => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  for (const entry of entries.filter(entry => entry.isFile() && /^\d{13}-[a-f0-9-]{36}\.json$/.test(entry.name)).sort((a, b) => b.name.localeCompare(a.name))) {
+    const file = path.join(directory, entry.name);
+    const job = await readJson(file, null).catch(error => { if (error instanceof SyntaxError) return null; throw error; });
+    if (job?.runId === id) return file;
+  }
+  throw new Error(`No retry job found for run ${id}. Retry jobs may have been removed by veo flush.`);
 }
 
 /**
@@ -96,7 +117,10 @@ export async function runJob(options, { download, reporter, signal, openFile, st
       let title;
       const publish = async files => {
         if (!options.json) for (const target of files) {
-          if (!published.has(target)) stdout.write(styleText(stdout, `Saved: ${cleanText(target)}`, 'success', options.color !== false) + '\n');
+          if (!published.has(target)) {
+            const display = terminalText(stdout, `Saved: ${cleanText(target)}`);
+            stdout.write(styleText(stdout, display.startsWith('Saved: ') ? `Saved: ${folderLink(stdout, target, display.slice(7))}` : display, 'success', options.color !== false) + '\n');
+          }
           published.add(target);
         }
         if (request.open && !opened && files.length) {
@@ -134,7 +158,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
         if (!signal?.aborted) failed++;
         item.files = item.entries.flatMap(entry => entry.files || []);
         if (options.json) stdout.write(`${JSON.stringify({ url: request.url, status: item.status, profile: request.profile || null, error: item.error, files: item.files, ...(runId ? { runId } : {}) })}\n`);
-        else stderr.write(styleText(stderr, `veo: ${cleanText(request.url)}: ${item.error}`, 'error', options.color !== false) + '\n');
+        else stderr.write(styleText(stderr, terminalText(stderr, `veo: ${item.error} (${request.url})`), 'error', options.color !== false) + '\n');
       }
       if (recordStats) {
         try {
@@ -175,7 +199,7 @@ export async function runJob(options, { download, reporter, signal, openFile, st
     }
     if (Object.keys(totals).length) stderr.write(styleText(stderr, formatTimings(totals), 'muted', options.color !== false && !options.json) + '\n');
   }
-  if (unfinished) stderr.write(`Retry failed/unfinished downloads: veo --retry-failed "${file}"\n`);
+  if (unfinished) stderr.write(`Retry failed/unfinished downloads: veo --retry-failed ${runId || `"${file}"`}\n`);
   if (unfinished) reporter.fail(Boolean(signal?.aborted)); else reporter.complete();
   return signal?.aborted ? 130 : unfinished ? 1 : 0;
 }

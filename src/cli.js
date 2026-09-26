@@ -66,7 +66,7 @@ Options:
   --json                   Print one JSON object per URL instead of prose
   --profile <name>         Apply a named config profile
   --batch-file <file>      Read URLs from a file (one per line; # comments)
-  --retry-failed <file>    Retry failed/unfinished items from a saved job
+  --retry-failed <id|file> Retry failed/unfinished items by run ID or job file
   --playlist-items <list>  Select playlist entries, e.g. 1,3-5 (implies --playlist)
   --skip-existing         Skip matching downloads still present on disk
   --no-<boolean-option>   Disable a stored boolean default, e.g. --no-open

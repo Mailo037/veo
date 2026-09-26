@@ -122,6 +122,30 @@ test('latest failed retry job skips newer successful and active jobs', async () 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('retry by run ID resolves existing jobs and rejects active, completed and missing runs', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'veo-retry-id-'));
+  const jobs = path.join(root, 'jobs');
+  try {
+    await mkdir(jobs);
+    const file = path.join(jobs, '1700000000001-00000000-0000-0000-0000-000000000000.json');
+    const job = { version: 1, runId: 'abc123', options: { output: root, quality: '720p' }, items: [{ status: 'failed', url }, { status: 'saved', url: 'https://example.test/saved' }] };
+    await writeFile(file, JSON.stringify(job));
+    assert.equal(parseCli(['--retry-failed', 'abc123']).retryFailed, 'abc123');
+    assert.deepEqual(await retryOptions('abc123', root), await retryOptions(file));
+    await assert.rejects(retryOptions('xyz789', root), /No retry job found for run xyz789/);
+    const run = await registerRun(() => {}, root);
+    try {
+      await run.describe({ job: file });
+      job.runId = run.id;
+      await writeFile(file, JSON.stringify(job));
+      await assert.rejects(retryOptions(run.id, root), /still active/);
+    } finally { await run.unregister(); }
+    job.items = [{ status: 'saved', url }];
+    await writeFile(file, JSON.stringify(job));
+    await assert.rejects(retryOptions(job.runId, root), /no failed or unfinished/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('playlist failure preserves successes and resume downloads only the missing entry', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'veo-list-resume-'));
   const attempted = [];

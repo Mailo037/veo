@@ -132,7 +132,7 @@ export function formatHistory(entries, limit = HISTORY_LIMIT, { failed = false }
     lines.push(`   Date:   ${localStamp(entry.at)}${entry.elapsedMs ? ` (${describeDuration(entry.elapsedMs)})` : ''}`);
     lines.push(`   URL:    ${entry.url}`);
     if (entry.error) lines.push(`   Error:  ${entry.error}`);
-    if (entry.job) lines.push(`   Retry:  veo --retry-failed "${entry.job}"`);
+    if (entry.job) lines.push(`   Retry:  veo --retry-failed ${entry.runId || `"${entry.job}"`}`);
     for (const [position, file] of entry.files.slice(0, SHOWN_FILES).entries()) {
       lines.push(`${position ? '           ' : '   Saved:  '}${file}`);
     }

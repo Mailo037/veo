@@ -1,11 +1,65 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReporter, formatProgress } from '../src/progress.js';
+import { createReporter, formatProgress, terminalTitle } from '../src/progress.js';
 import { outputStream } from '../src/output.js';
 import { readableError } from '../src/utils.js';
 import { runBackend } from '../src/downloader.js';
+import { EventEmitter } from 'node:events';
 
 const data = { stream: 'Media', downloaded_bytes: 90 * 1024 ** 2, total_bytes_estimate: 1024 ** 3, speed: 12.6 * 1024 ** 2, eta: 77 };
+
+test('resize redraws live progress without backend updates and restores fitting titles', () => {
+  const output = Object.assign(new EventEmitter(), { isTTY: true, columns: 120, text: '', write(value) { this.text += value; } });
+  const reporter = createReporter(outputStream(output), { setTitle() {} });
+  const title = 'A moderately long video title';
+  reporter.scoped(1, 2, title).progress(data);
+  assert.ok(output.text.split('\r\x1b[2K').at(-1).includes(title));
+  output.columns = 40;
+  output.emit('resize');
+  const narrow = output.text.split('\r\x1b[2K').at(-1);
+  assert.ok(narrow.length < 40);
+  assert.ok(narrow.includes('…'));
+  output.columns = 120;
+  output.emit('resize');
+  assert.ok(output.text.split('\r\x1b[2K').at(-1).includes(title));
+  assert.equal(output.listenerCount('resize'), 1);
+  reporter.finish();
+  assert.equal(output.listenerCount('resize'), 0);
+});
+
+test('long URLs, titles and scoped status lines fit the terminal; pipe output stays complete', () => {
+  const long = 'https://example.test/' + 'token'.repeat(100);
+  for (const columns of [40, 80, 120]) {
+    const output = { isTTY: true, columns, text: '', write(value) { this.text += value; } };
+    const reporter = createReporter(output, { setTitle() {} });
+    reporter.configure({ color: false });
+    reporter.item(1, 2, long);
+    reporter.name('Name ' + long);
+    reporter.status(long);
+    reporter.scoped(1, 2, long).status('Reading video: done');
+    reporter.profile(long);
+    const lines = output.text.trimEnd().split('\n');
+    assert.equal(lines.length, 9);
+    for (const line of lines) {
+      assert.ok(line.length < columns, line);
+    }
+    for (const index of [2, 5, 6, 7, 8]) assert.ok(lines[index].endsWith('…'), lines[index]);
+  }
+  const pipe = { text: '', write(value) { this.text += value; } };
+  createReporter(pipe, { setTitle() {} }).item(1, 1, long);
+  assert.equal(pipe.text, long + '\n');
+});
+
+test('titles wrap to three lines and truncate only when that space is exceeded', () => {
+  const terminal = { isTTY: true, columns: 11 };
+  assert.equal(terminalTitle(terminal, 'Short'), 'Short');
+  assert.equal(terminalTitle(terminal, 'a'.repeat(20)), 'a'.repeat(10) + '\n' + 'a'.repeat(10));
+  assert.equal(terminalTitle(terminal, 'a'.repeat(30)), Array(3).fill('a'.repeat(10)).join('\n'));
+  assert.equal(terminalTitle(terminal, 'a'.repeat(31)), ['a'.repeat(10), 'a'.repeat(10), 'a'.repeat(9) + '…'].join('\n'));
+  assert.equal(terminalTitle(terminal, '界'.repeat(16)), ['界'.repeat(5), '界'.repeat(5), '界'.repeat(4) + '…'].join('\n'));
+  terminal.columns = 40;
+  assert.equal(terminalTitle(terminal, 'a'.repeat(31)), 'a'.repeat(31));
+});
 
 test('non-default profile is white after a gray label only when terminal colors are enabled', () => {
   const output = () => ({ isTTY: true, text: '', write(value) { this.text += value; } });

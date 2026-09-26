@@ -6,6 +6,7 @@ import { parseConfigText } from './config.js';
 import { semanticIssue, editorCompletions } from './config-diagnostics.js';
 import { configClipboard } from './config-clipboard.js';
 import { addConfigGuide, configGuideState, removeConfigGuide } from './config-template.js';
+import { folderLink } from './path-links.js';
 
 const safe = text => text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 
@@ -118,19 +119,18 @@ export async function editConfig(file, { input = process.stdin, output = process
   let status = guideState === 'outdated' ? 'Updated config guide available. Press F3 to choose.' :
     guideState === 'current' ? 'Generated guide in file. Press F3 to remove it if duplicated.' : '', revision = 0;
   let viewport, dragging = false, completion = null;
-  const wasRaw = input.isRaw, wasPaused = input.isPaused();
+  const wasRaw = input.isRaw, wasPaused = input.isPaused(), wasFlowing = input.readableFlowing;
   const render = () => {
     if (closed) return;
     const width = Math.max(1, (output.columns || 80) - 1);
     const diagnosis = issue ? `${issue.line ? `Line ${issue.line}, column ${issue.column}: ` : ''}${issue.message}` : '';
     const detail = safe(completion ? `Options (${completion.index + 1}/${completion.choices.length}): ${JSON.stringify(completion.choices[completion.index])} | Up/Down choose, Enter apply, Esc cancel` :
       status ? `${status}${diagnosis ? ` | ${diagnosis}` : ''}` : diagnosis || 'Config OK');
-    const detailRows = Math.min(3, Math.max(1, Math.ceil(detail.length / width)));
     const helpLines = question ? ['Discard unsaved changes? Y = discard, N / Esc = keep editing'] :
       guidePrompt ? ['Guide: A add/update | R remove | Esc cancel'] :
         ['F3 Guide | F2 Options | Ctrl+S Save | Ctrl+Z Undo | Ctrl+Y Redo',
           'Ctrl+A All | Ctrl+C Copy | Ctrl+V Paste | Esc / Ctrl+Q Exit'];
-    const height = Math.max(1, (output.rows || 24) - 1 - helpLines.length - detailRows);
+    const height = Math.max(1, (output.rows || 24) - 3);
     const lines = buffer.text.split('\n'), { row, col } = buffer.position;
     const gutter = Math.min(width - 1, String(lines.length).length + 2), available = Math.max(1, width - gutter);
     if (followCursor) {
@@ -142,7 +142,9 @@ export async function editConfig(file, { input = process.stdin, output = process
     viewport = { height, gutter, width };
     const [selectionStart, selectionEnd] = buffer.selection;
     let offset = lines.slice(0, top).reduce((sum, line) => sum + line.length + 1, 0);
-    const screen = [safe(`veo config | ${file}${buffer.text !== saved ? ' *' : ''}`).slice(0, width)];
+    const heading = safe(`veo config | ${file}${buffer.text !== saved ? ' *' : ''}`).slice(0, width);
+    const pathLabel = heading.slice(13, Math.min(heading.length, 13 + safe(file).length));
+    const screen = [heading.slice(0, 13) + folderLink(output, file, pathLabel) + heading.slice(13 + pathLabel.length)];
     for (let index = top; index < top + height; index++) {
       const line = lines[index];
       const prefix = line === undefined ? '' : `${index + 1 === issue?.line ? '!' : ' '}${String(index + 1).padStart(Math.max(0, gutter - 2))} `;
@@ -157,18 +159,18 @@ export async function editConfig(file, { input = process.stdin, output = process
       offset += (line || '').length + 1;
     }
     const position = `Ln ${row + 1}, Col ${col + 1}`;
-    for (let index = 0; index < helpLines.length; index++) {
-      const last = index === helpLines.length - 1;
-      const helpWidth = Math.max(0, width - (last ? position.length + 1 : 0));
-      const visibleHelp = safe(helpLines[index]).slice(0, helpWidth);
-      const footer = last ? visibleHelp + ' '.repeat(Math.max(1, width - position.length - visibleHelp.length)) + position : visibleHelp;
-      screen.push(color ? footer.replace(/Ctrl\+[A-Z]|F[23]|Esc|\b[A,R]\b/g, match => `\x1b[1;36m${match}\x1b[0m`) : footer);
-    }
-    for (let index = 0; index < detailRows; index++) {
-      const line = detail.slice(index * width, (index + 1) * width);
-      const tone = completion ? 33 : issue ? 31 : status ? 32 : 90;
-      screen.push(color && line ? `\x1b[${tone}m${line}\x1b[0m` : line);
-    }
+    const tone = completion ? 33 : issue ? 31 : status ? 32 : 90;
+    const styledDetail = value => color ? `\x1b[${tone}m${value}\x1b[0m` : value;
+    const styledHelp = value => color ? value.replace(/Ctrl\+[A-Z]|F[23]|Esc|\b[A,R]\b/g, match => `\x1b[1;36m${match}\x1b[0m`) : value;
+    const prompt = question || guidePrompt;
+    const longDetail = prompt || detail.length + position.length + 3 > Math.max(30, Math.floor(width / 2));
+    screen.push(prompt ? styledHelp(safe(helpLines[0]).slice(0, width)) :
+      longDetail ? styledDetail(detail.slice(0, width)) : styledHelp(safe(helpLines[0]).slice(0, width)));
+    const right = (longDetail ? '' : `${detail} | `) + position;
+    const helpWidth = Math.max(0, width - right.length - 1);
+    const help = safe(helpLines[1] || '').slice(0, helpWidth);
+    const padding = ' '.repeat(Math.max(0, width - help.length - right.length));
+    screen.push(styledHelp(help) + padding + (longDetail ? position : styledDetail(detail) + ' | ' + position));
     const cursorVisible = row >= top && row < top + height;
     output.write('\x1b[?25l\x1b[H' + screen.map(line => line + '\x1b[K').join('\r\n') +
       (cursorVisible ? `\x1b[${row - top + 2};${gutter + col - left + 1}H\x1b[?25h` : ''));
@@ -253,7 +255,9 @@ export async function editConfig(file, { input = process.stdin, output = process
       closed = true; clearTimeout(timer); clearTimeout(mouseTimer); stopDrag();
       input.off('data', onData); keyboard.off('keypress', onKey); keyboard.destroy();
       input.off('keypress', onKey); input.off('end', onEnd); input.off('error', onError); output.off('resize', render);
-      input.setRawMode(Boolean(wasRaw)); if (wasPaused) input.pause();
+      input.setRawMode(Boolean(wasRaw));
+      // A fresh stdin has no explicit pause, but resume() still keeps its handle alive.
+      if (wasPaused || wasFlowing !== true) input.pause();
       output.write('\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l');
       error ? reject(error) : resolve();
     };
